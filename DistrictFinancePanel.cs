@@ -95,6 +95,8 @@ namespace DistrictFinanceManager
         private int _viewMode; // 0=层级 1=组合 2=所有区划 3=市 4=区县 5=乡镇 6=村社区
         private bool _filterSubtree;
         private int _activeGroupIdx = -1;
+        /// <summary>当前“选中”并在顶部显示合计详情的组合索引（-1 = 无，与区划选择互斥）。</summary>
+        private int _detailGroup = -1;
         /// <summary>组合列表（按存档保存，来自 Hub）。</summary>
         private List<GroupData> Groups
         {
@@ -185,8 +187,8 @@ namespace DistrictFinanceManager
                 if (toolDistrict != 0)
                 {
                     _hub.SelectedVanillaDistrict = toolDistrict;
-                    if (_hub.SelectedID == 0)
-                        _hub.SelectedID = (ushort)toolDistrict;
+                    if (_hub.SelectedID == 0 && _detailGroup < 0) // 组合选中时不被地图区划抢选择
+                        SelectDistrict((ushort)toolDistrict);
                 }
             }
         }
@@ -341,8 +343,7 @@ namespace DistrictFinanceManager
             // 右键：取消当前选中区划
             if (e.type == EventType.MouseDown && e.button == 1 && panelScreen.Contains(e.mousePosition))
             {
-                _hub.SelectedID = 0;
-                _finDistrict = 0;
+                ClearSelection();
                 e.Use();
                 return;
             }
@@ -431,7 +432,12 @@ namespace DistrictFinanceManager
                 }
             }
 
-            if (_hub.SelectedID == 0)
+            if (_detailGroup >= 0 && _detailGroup < Groups.Count)
+            {
+                // 组合：只显示合计详情
+                y = DrawGroupSummary(PAD, y, PW - PAD * 2);
+            }
+            else if (_hub.SelectedID == 0)
             {
                 GUI.Label(new Rect(PAD, y, PW - PAD * 2, TEXT_H * 2),
                     Loc.T("点击下方『所有区划』可查看默认排序。",
@@ -515,12 +521,16 @@ namespace DistrictFinanceManager
             }
 
             // 状态
-            string status = Loc.T("当前选中：", "Selected: ") + (_hub.SelectedID == 0
-                ? Loc.T("无", "None")
-                : _hub.GetVanillaDistrictName(_hub.SelectedID) + " [" +
+            string status = Loc.T("当前选中：", "Selected: ");
+            if (_detailGroup >= 0 && _detailGroup < Groups.Count)
+                status += Loc.T("组合 · ", "Group · ") + Groups[_detailGroup].Name;
+            else if (_hub.SelectedID == 0)
+                status += Loc.T("无", "None");
+            else
+                status += _hub.GetVanillaDistrictName(_hub.SelectedID) + " [" +
                   (_hub.Hierarchy.LevelOf.ContainsKey(_hub.SelectedID)
                       ? LevelName(_hub.Hierarchy.LevelOf[_hub.SelectedID])
-                      : Loc.T("未分配", "Unassigned")) + "]");
+                      : Loc.T("未分配", "Unassigned")) + "]";
             GUI.Label(new Rect(PAD, y, PW - PAD * 2, TEXT_H), status, _fl);
             y += TEXT_H + GAP;
 
@@ -577,8 +587,10 @@ namespace DistrictFinanceManager
             float r1 = PAD;
             if (GUI.Button(new Rect(r1, y, 70, BTN_H), viewLabels[0], _viewMode == 0 ? _bn2 : _btn)) _viewMode = 0;
             if (GUI.Button(new Rect(r1 + 74, y, 70, BTN_H), viewLabels[1], _viewMode == 1 ? _bn2 : _btn)) _viewMode = 1;
+            bool groupSel = _detailGroup >= 0 && _detailGroup < Groups.Count;
             if (GUI.Button(new Rect(r1 + 148, y, 130, BTN_H),
-                Loc.T("筛选:选中下辖", "Filter: subtree"), _filterSubtree ? _bn2 : _btn))
+                groupSel ? Loc.T("筛选:组合成员", "Filter: group members")
+                         : Loc.T("筛选:选中下辖", "Filter: subtree"), _filterSubtree ? _bn2 : _btn))
                 _filterSubtree = !_filterSubtree;
             y += BTN_H + GAP;
 
@@ -730,8 +742,7 @@ namespace DistrictFinanceManager
             Rect row = new Rect(ind, y, w - ind, NODE_H);
             if (GUI.Button(row, prefix + tag + name, st))
             {
-                _hub.SelectedID = id;
-                _finDistrict = 0;
+                SelectDistrict(id);
                 if (has) { _ex[id] = !ex; }
             }
             GUI.color = old;
@@ -804,10 +815,14 @@ namespace DistrictFinanceManager
             GUI.EndScrollView();
         }
 
-        /// <summary>是否通过筛选：未开启筛选、未选中区划时全通过；否则仅保留选中区划的（严格）下辖。</summary>
+        /// <summary>是否通过筛选：开启筛选时——若选中组合则只保留该组合成员；
+        /// 若选中区划则保留其层级下辖及祖先链；两者都无则全通过。</summary>
         private bool PassFilter(ushort did)
         {
-            if (!_filterSubtree || _hub.SelectedID == 0) return true;
+            if (!_filterSubtree) return true;
+            if (_detailGroup >= 0 && _detailGroup < Groups.Count)
+                return Groups[_detailGroup].Members.Contains(did); // 按组合成员过滤
+            if (_hub.SelectedID == 0) return true;
             if (did == _hub.SelectedID) return true; // 包含父节点自身
             // 保留选中节点的祖先链（上级直辖条目，如按X市筛选后区县排名里保留X市直辖）
             if (_hub.Hierarchy.IsDescendantOf(_hub.SelectedID, did)) return true;
@@ -901,8 +916,7 @@ namespace DistrictFinanceManager
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
                 if (GUI.Button(btn, line, _rankBtn))
                 {
-                    _hub.SelectedID = did;
-                    _finDistrict = 0;
+                    SelectDistrict(did);
                 }
                 GUI.color = old;
             }
@@ -976,8 +990,7 @@ namespace DistrictFinanceManager
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
                 if (GUI.Button(btn, line, _rankBtn))
                 {
-                    _hub.SelectedID = did;
-                    _finDistrict = 0;
+                    SelectDistrict(did);
                 }
                 GUI.color = old;
             }
@@ -1002,6 +1015,8 @@ namespace DistrictFinanceManager
         {
             double[] gdp = _hub.Calculator.GetDistrictGDP();
             long[] pop = _hub.Calculator.GetDistrictPopulation();
+            long[] landRaw = _hub.Calculator.GetDistrictLandValue(); // 组合地价按成员面积加权平均
+            long[] areaRaw = _hub.Calculator.GetDistrictArea();
             ushort[] all = _hub.GetVanillaDistricts();
             float lw = list.width - 20;
             float x0 = list.x;
@@ -1048,7 +1063,7 @@ namespace DistrictFinanceManager
             // 组合排序列表（固定；右键组合名收起/展开成员）
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
-            order.Sort((a, b) => GroupValue(b, gdp, pop).CompareTo(GroupValue(a, gdp, pop)));
+            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw)));
 
             int toDelete = -1;
             for (int r = 0; r < order.Count; r++)
@@ -1056,14 +1071,18 @@ namespace DistrictFinanceManager
                 int gi = order[r];
                 GroupData g = Groups[gi];
                 bool active = gi == _activeGroupIdx;
+                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw);
                 string line = (active ? "▶ " : "  ") + (r + 1) + ". " + g.Name
-                    + "  " + FormatSortValue(GroupValue(gi, gdp, pop))
+                    + "  " + FormatSortValue(gval)
                     + "  " + Loc.T("成员", "mem") + g.Members.Count;
                 Rect rowRect = new Rect(x0, cy, lw - 146, NODE_H);
                 Color old = GUI.color;
-                if (!active) GUI.color = GdpColor(GroupValue(gi, gdp, pop));
+                if (!active) GUI.color = SortColor(_sortKey, gval);
                 if (GUI.Button(rowRect, line, active ? _ts : _rankBtn))
-                    _activeGroupIdx = active ? -1 : gi;
+                {
+                    _activeGroupIdx = active ? -1 : gi; // 保持原“展开/收起成员”交互
+                    if (gi != _detailGroup) SelectGroup(gi); // 点击组合 → 顶部显示该组合合计
+                }
                 GUI.color = old;
                 if (GUI.Button(new Rect(x0 + lw - 142, cy, 66, NODE_H), Loc.T("删除", "Del"), _btn))
                     toDelete = gi;
@@ -1079,6 +1098,8 @@ namespace DistrictFinanceManager
                 Groups.RemoveAt(toDelete);
                 if (_activeGroupIdx >= toDelete) _activeGroupIdx--;
                 if (_activeGroupIdx >= Groups.Count) _activeGroupIdx = -1;
+                if (_detailGroup == toDelete) _detailGroup = -1;       // 删除的是详情组合 → 清空
+                else if (_detailGroup > toDelete) _detailGroup--;
                 if (_hub != null) _hub.MarkDirty();
             }
             cy += GAP;
@@ -1330,10 +1351,27 @@ namespace DistrictFinanceManager
             }
         }
 
-        /// <summary>组合的统计值：成员自身值按排序依据求和（GDP/人口/人均）。</summary>
-        private double GroupValue(int idx, double[] gdp, long[] pop)
+        /// <summary>组合的统计值（按排序依据）：GDP/人口为成员求和，人均=和/和；
+        /// 地价为成员面积加权平均地价再随模式换算显示（避免把地价当 GDP 求和导致异常高）。</summary>
+        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, long[] areaRaw)
         {
             GroupData g = Groups[idx];
+
+            // 地价：面积加权平均（kr/m²），×LandMult 后与列表/图例同一口径
+            if (_sortKey == 3)
+            {
+                double lsum = 0, asum = 0;
+                foreach (ushort m in g.Members)
+                {
+                    if (m >= landRaw.Length || m >= areaRaw.Length) continue;
+                    long a = areaRaw[m];
+                    if (a <= 0) continue;
+                    lsum += landRaw[m] * a;
+                    asum += a;
+                }
+                return asum > 0 ? (lsum / asum) * LandMult() : 0;
+            }
+
             double sg = 0, sp = 0;
             foreach (ushort m in g.Members)
             {
@@ -1346,6 +1384,51 @@ namespace DistrictFinanceManager
                 case 2: return sp > 0 ? sg / sp : 0;
                 default: return sg;
             }
+        }
+
+        /// <summary>选中一个区划：取消组合选择。</summary>
+        private void SelectDistrict(ushort id)
+        {
+            _detailGroup = -1;
+            _hub.SelectedID = id;
+            _finDistrict = 0;
+        }
+
+        /// <summary>清除当前选择（区划 + 组合）。</summary>
+        private void ClearSelection()
+        {
+            _detailGroup = -1;
+            _hub.SelectedID = 0;
+            _finDistrict = 0;
+        }
+
+        /// <summary>选中一个组合，顶部显示其合计详情（清除区划选择）。</summary>
+        private void SelectGroup(int gi)
+        {
+            _hub.SelectedID = 0;
+            _finDistrict = 0;
+            _detailGroup = gi;
+        }
+
+        /// <summary>组合成员自身值的合计：GDP/人口/工人/建筑/面积（只显示合计用）。</summary>
+        private bool ComputeGroupTotals(int gi, out double gdp, out long pop,
+            out int workers, out int buildings, out long area)
+        {
+            gdp = 0; pop = 0; workers = 0; buildings = 0; area = 0;
+            if (_hub == null || _hub.Calculator == null) return false;
+            if (gi < 0 || gi >= Groups.Count) return false;
+            GroupData g = Groups[gi];
+            foreach (ushort m in g.Members)
+            {
+                DistrictFinanceCalculator.FinanceResult c = _hub.Calculator.Calculate(m);
+                if (!c.IsValid) continue;
+                gdp += c.GDP;
+                pop += c.Population;
+                workers += c.Workers;
+                buildings += c.BuildingCount;
+                area += c.Area;
+            }
+            return g.Members.Count > 0;
         }
 
         private ushort ResolveParent(int level)
@@ -1368,8 +1451,7 @@ namespace DistrictFinanceManager
             if (id == 0) return;
             _hub.Hierarchy.Remove(id);
             _hub.MarkDirty();
-            _hub.SelectedID = 0;
-            _finDistrict = 0;
+            ClearSelection();
             _fin = new DistrictFinanceCalculator.FinanceResult();
         }
 
@@ -1433,6 +1515,40 @@ namespace DistrictFinanceManager
             if (km2 >= 100) return km2.ToString("0.0");
             if (km2 >= 0.1) return km2.ToString("0.00");
             return km2.ToString("0.000");
+        }
+
+        /// <summary>选中组合时在顶部绘制合计详情（只显示合计，不区分自身/下辖）。返回新 y。</summary>
+        private float DrawGroupSummary(float x, float y, float w)
+        {
+            if (_detailGroup < 0 || _detailGroup >= Groups.Count) return y;
+            GroupData g = Groups[_detailGroup];
+            string gname = string.IsNullOrEmpty(g.Name) ? Loc.T("未命名", "unnamed") : g.Name;
+            GUI.Label(new Rect(x, y, w, TITLE_H), "📊 " + Loc.T("组合 · ", "Group · ") + gname, _ti);
+            y += TITLE_H;
+
+            double gdp; long pop; int workers, buildings; long area;
+            bool any = ComputeGroupTotals(_detailGroup, out gdp, out pop, out workers, out buildings, out area);
+            if (!any)
+            {
+                GUI.Label(new Rect(x, y, w, TEXT_H), Loc.T("（空组合，点击下方区划加入）", "(empty — click districts below to add)"), _fl);
+                y += TEXT_H + GAP;
+                return y;
+            }
+
+            double pcap = pop > 0 ? gdp / pop : 0.0;
+            DrawGdp(new Rect(x, y, w, VALUE_H),
+                Loc.T("合计 GDP " + CurrencySymbol(), "Total GDP " + CurrencySymbol()), gdp);
+            y += VALUE_H;
+            DrawGdpPerCapita(new Rect(x, y, w, VALUE_H),
+                Loc.T("合计 人均GDP " + CurrencySymbol(), "Total GDP/cap " + CurrencySymbol()), pcap, (int)pop);
+            y += VALUE_H;
+            DrawPopulationLine(new Rect(x, y, w, TEXT_H),
+                Loc.T("合计 人口 ", "Total pop "), (int)pop, workers, buildings);
+            y += TEXT_H;
+            GUI.Label(new Rect(x, y, w, TEXT_H),
+                Loc.T("合计 面积 ", "Total area ") + AreaKm2(area) + Loc.T(" km²", " km²"), _fl);
+            y += TEXT_H + GAP;
+            return y;
         }
 
         /// <summary>绘制人均GDP（K/M/G 简写，按数值分档着色；人口为 0 时显示灰色“—”）。</summary>

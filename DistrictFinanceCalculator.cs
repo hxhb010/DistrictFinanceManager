@@ -187,8 +187,9 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
-        /// 聚合人口加权地价：区划自身 + 全部下辖，按各成员人口加权平均地价。
-        /// （单区划 = 自身地价；有下辖 = 加权平均）
+        /// 聚合面积加权地价：层级树内每个节点 = 自身 + 全部下辖（含递归孙辈）的面积加权平均地价，
+        /// 保证各级别（市/区县/乡镇/村社区）排名时都按聚合值排序。
+        /// 未入树的已创建区划 = 自身地价。
         /// </summary>
         public double[] GetAggregateLandValue()
         {
@@ -198,20 +199,33 @@ namespace DistrictFinanceManager
             long[] area = GetDistrictArea();
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             double[] agg = new double[256];
-            if (hub == null || hub.Hierarchy == null) return self;
+            for (int i = 0; i < 256; i++) agg[i] = self[i];
+            if (hub == null || hub.Hierarchy == null) return agg;
 
+            double[] lsum = new double[256]; // 子树 地价×面积 累加
+            double[] wsum = new double[256]; // 子树 面积 累加
+            var visited = new HashSet<ushort>();
             foreach (ushort root in hub.Hierarchy.GetRootNodes())
-                ComputeWeightedLand(root, self, area, agg, hub.Hierarchy, new HashSet<ushort>());
-            DistrictManager dm = Singleton<DistrictManager>.instance;
-            if (dm != null)
-            {
-                District[] dbuf = dm.m_districts.m_buffer;
-                uint dsize = dm.m_districts.m_size;
-                for (uint d = 1; d < dsize; d++)
-                    if ((dbuf[d].m_flags & District.Flags.Created) != 0 && agg[d] == 0)
-                        agg[d] = self[d];
-            }
+                AccumLand(root, self, area, lsum, wsum, hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited))
+                agg[id] = wsum[id] > 0 ? lsum[id] / wsum[id] : self[id];
             return agg;
+        }
+
+        /// <summary>后序累加：先算完子节点子树，再把 子节点子树 累进父节点，得到每个节点自身的子树合计。</summary>
+        private static void AccumLand(ushort d, double[] self, long[] area, double[] lsum, double[] wsum, DistrictHierarchy h, HashSet<ushort> visited)
+        {
+            if (!visited.Add(d)) return;
+            double l = self[d] * System.Math.Max(1, area[d]);
+            double w = System.Math.Max(1, area[d]);
+            foreach (ushort child in h.GetChildren(d))
+            {
+                AccumLand(child, self, area, lsum, wsum, h, visited);
+                l += lsum[child];
+                w += wsum[child];
+            }
+            lsum[d] = l;
+            wsum[d] = w;
         }
 
         /// <summary>区划精确面积：遍历区划网格逐格统计格数（缓存 CACHE_LIFE）。</summary>
@@ -242,28 +256,6 @@ namespace DistrictFinanceManager
             _districtArea = cnt;
             _districtAreaTime = Time.time;
             return cnt;
-        }
-
-        private static double ComputeWeightedLand(ushort d, double[] self, long[] weight, double[] agg, DistrictHierarchy h, HashSet<ushort> visited)
-        {
-            if (!visited.Add(d)) return agg[d];
-            double landSum = self[d] * System.Math.Max(1, weight[d]);
-            double wSum = System.Math.Max(1, weight[d]);
-            CollectWeighted(d, self, weight, ref landSum, ref wSum, h, new HashSet<ushort>());
-            double r = wSum > 0 ? landSum / wSum : self[d];
-            agg[d] = r;
-            return r;
-        }
-
-        private static void CollectWeighted(ushort d, double[] self, long[] weight, ref double landSum, ref double wSum, DistrictHierarchy h, HashSet<ushort> visited)
-        {
-            if (!visited.Add(d)) return;
-            foreach (ushort child in h.GetChildren(d))
-            {
-                landSum += self[child] * System.Math.Max(1, weight[child]);
-                wSum += System.Math.Max(1, weight[child]);
-                CollectWeighted(child, self, weight, ref landSum, ref wSum, h, visited);
-            }
         }
 
 /// <summary>所有原版区划的居民数（按区划ID索引），直接读游戏数据，用于人口排序。</summary>
