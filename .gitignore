@@ -1,0 +1,12 @@
+# build outputs
+bin/
+obj/
+
+# backups / junk
+*.bak
+*.user
+*.suo
+*.pdb
+
+# local absolute-path helper (not portable)
+build.bat
