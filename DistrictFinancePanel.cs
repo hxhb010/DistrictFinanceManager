@@ -1080,8 +1080,10 @@ namespace DistrictFinanceManager
                 if (!active) GUI.color = SortColor(_sortKey, gval);
                 if (GUI.Button(rowRect, line, active ? _ts : _rankBtn))
                 {
-                    _activeGroupIdx = active ? -1 : gi; // 保持原“展开/收起成员”交互
-                    if (gi != _detailGroup) SelectGroup(gi); // 点击组合 → 顶部显示该组合合计
+                    // 激活该组并切换成员展开状态（可逆）；同时顶部显示该组合合计
+                    _activeGroupIdx = gi;
+                    _memberExpand = !_memberExpand;
+                    SelectGroup(gi);
                 }
                 GUI.color = old;
                 if (GUI.Button(new Rect(x0 + lw - 142, cy, 66, NODE_H), Loc.T("删除", "Del"), _btn))
