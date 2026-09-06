@@ -608,16 +608,16 @@ namespace DistrictFinanceManager
 
             // 第 3 排：排序依据
             string[] sortLabels = Loc.IsEn
-                ? new string[] { "GDP", "Pop", "GDP/cap", "Land" }
-                : new string[] { "GDP", "人口", "人均GDP", "地价" };
+                ? new string[] { "GDP", "Pop", "GDP/cap", "Land", "GDP/m²", "Pop/m²" }
+                : new string[] { "GDP", "人口", "人均GDP", "地价", "地均GDP", "人口密度" };
             GUI.Label(new Rect(PAD, y, 60, BTN_H), Loc.T("排序:", "Sort: "), _fl);
             float sx = PAD + 60;
             for (int i = 0; i < sortLabels.Length; i++)
             {
                 bool on = _sortKey == i;
-                if (GUI.Button(new Rect(sx, y, 64, BTN_H), sortLabels[i], on ? _bn2 : _btn))
+                if (GUI.Button(new Rect(sx, y, 66, BTN_H), sortLabels[i], on ? _bn2 : _btn))
                     _sortKey = i;
-                sx += 68;
+                sx += 70;
             }
             y += BTN_H + GAP;
 
@@ -829,13 +829,31 @@ namespace DistrictFinanceManager
             return _hub.Hierarchy.IsDescendantOf(did, _hub.SelectedID);
         }
 
-        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null)
+        /// <summary>地均GDP = GDP / 面积(m²)，用于排序（面积 = 格数×64 m²，0 时返回 0）。</summary>
+        private static double GdpPerArea(ushort did, double[] gdp, double[] m2)
+        {
+            if (m2 == null || m2[did] <= 0) return 0.0;
+            return gdp[did] / m2[did];
+        }
+
+        /// <summary>把面积格数（long[]）换算成 m² 显示值 double[]（1 格 = 64 m²）。</summary>
+        private static double[] AreaToM2(long[] cells)
+        {
+            double[] r = new double[cells.Length];
+            for (int i = 0; i < cells.Length; i++) r[i] = cells[i] * 64.0;
+            return r;
+        }
+
+        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null)
         {
             switch (key)
             {
                 case 1: return pop[did];
                 case 2: return pop[did] > 0 ? gdp[did] / pop[did] : 0.0;
                 case 3: return land != null ? land[did] : 0.0;
+                case 4: return GdpPerArea(did, gdp, m2);
+                case 5: // 人口密度 = 人口/面积(km²)；m2 为平方米，km² = m2/1e6，故 = pop*1e6/m2
+                    return (m2 != null && m2[did] > 0) ? pop[did] * 1000000.0 / m2[did] : 0.0;
                 default: return gdp[did];
             }
         }
@@ -848,6 +866,8 @@ namespace DistrictFinanceManager
                 case 1: return value.ToString("N0") + Loc.T(" 人", " pop");
                 case 2: return cur + F(value) + Loc.T("/人", "/cap");
                 case 3: return value.ToString("0.00") + " " + LandUnit();
+                case 4: return cur + F(value) + Loc.T("/m²", "/m²");
+                case 5: return value.ToString("0.0") + Loc.T(" 人/km²", " pop/km²");
                 default: return cur + F((long)value);
             }
         }
@@ -857,6 +877,7 @@ namespace DistrictFinanceManager
             if (key == 1) return PopColor((long)value);
             if (key == 2) return GdpPerCapitaColor(value);
             if (key == 3) return LandColor(value);
+            if (key == 4 || key == 5) return Color.white; // 地均GDP/人口密度不按数值着色
             return GdpColor(value);
         }
 
@@ -867,6 +888,8 @@ namespace DistrictFinanceManager
                 case 1: return Loc.T("人口", "Population");
                 case 2: return Loc.T("人均GDP", "GDP/capita");
                 case 3: return Loc.T("地价", "Land value");
+                case 4: return Loc.T("地均GDP", "GDP/m²");
+                case 5: return Loc.T("人口密度", "Population density");
                 default: return "GDP";
             }
         }
@@ -886,6 +909,7 @@ namespace DistrictFinanceManager
             double[] gdp = _hub.Calculator.GetDistrictGDP();
             long[] pop = _hub.Calculator.GetDistrictPopulation();
             double[] landD = LandToDisplay(_hub.Calculator.GetDistrictLandValue());
+            double[] m2 = AreaToM2(_hub.Calculator.GetDistrictArea());
             ushort[] all = _hub.GetVanillaDistricts();
 
             var items = new List<KeyValuePair<ushort, double>>();
@@ -893,7 +917,7 @@ namespace DistrictFinanceManager
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD)));
+                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2)));
             }
             items.Sort((a, b) => b.Value.CompareTo(a.Value)); // 降序
 
@@ -904,13 +928,18 @@ namespace DistrictFinanceManager
                 Loc.T("— 各区划 " + SortLabel(_sortKey) + " 排名（降序，点击查看）—",
                       "— All districts by " + SortLabel(_sortKey) + " (desc, click to view) —"));
 
+            double totalGdp = TotalGdp(gdp);
+            long totalPop = TotalPop(pop);
             for (int i = 0; i < items.Count; i++)
             {
                 ushort did = items[i].Key;
                 string name = _hub.GetVanillaDistrictName(did);
                 bool selected = did == _hub.SelectedID;
+                string share = "";
+                if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(gdp[did], totalGdp);
+                else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(pop[did], totalPop);
                 string line = (selected ? "▶ " : "  ")
-                    + string.Format("{0}. {1}    {2}", i + 1, name, FormatSortValue(items[i].Value));
+                    + string.Format("{0}. {1}    {2}", i + 1, name, FormatSortValue(items[i].Value)) + share;
                 Color old = GUI.color;
                 GUI.color = SortColor(_sortKey, items[i].Value);
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
@@ -942,13 +971,15 @@ namespace DistrictFinanceManager
             long[] selfPop = _hub.Calculator.GetDistrictPopulation();
             double[] aggLandD = LandToDisplay(_hub.Calculator.GetAggregateLandValue());
             double[] selfLandD = LandToDisplay(_hub.Calculator.GetDistrictLandValue());
+            double[] aggM2 = AreaToM2(_hub.Calculator.GetAggregateArea());
+            double[] selfM2 = AreaToM2(_hub.Calculator.GetDistrictArea());
 
             var items = new List<RankEntry>();
             foreach (ushort did in _hub.Hierarchy.GetDistrictsByLevel(level))
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD), parentLevel = false });
+                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2), parentLevel = false });
             }
 
             // 加入上一级节点（直辖）：数值用其自身，不聚合
@@ -960,7 +991,7 @@ namespace DistrictFinanceManager
                 {
                     if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                     if (!PassFilter(did)) continue;
-                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD), parentLevel = true });
+                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2), parentLevel = true });
                 }
             }
 
@@ -1061,6 +1092,8 @@ namespace DistrictFinanceManager
             cy += BTN_H + GAP;
 
             // 组合排序列表（固定；右键组合名收起/展开成员）
+            double totalGdp = TotalGdp(gdp);
+            long totalPop = TotalPop(pop);
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
             order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw)));
@@ -1072,8 +1105,11 @@ namespace DistrictFinanceManager
                 GroupData g = Groups[gi];
                 bool active = gi == _activeGroupIdx;
                 double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw);
+                string share = "";
+                if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(GroupGdp(gi, gdp), totalGdp);
+                else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(GroupPop(gi, pop), totalPop);
                 string line = (active ? "▶ " : "  ") + (r + 1) + ". " + g.Name
-                    + "  " + FormatSortValue(gval)
+                    + "  " + FormatSortValue(gval) + share
                     + "  " + Loc.T("成员", "mem") + g.Members.Count;
                 Rect rowRect = new Rect(x0, cy, lw - 146, NODE_H);
                 Color old = GUI.color;
@@ -1374,18 +1410,60 @@ namespace DistrictFinanceManager
                 return asum > 0 ? (lsum / asum) * LandMult() : 0;
             }
 
-            double sg = 0, sp = 0;
+            double sg = 0, sp = 0, sa = 0;
             foreach (ushort m in g.Members)
             {
                 sg += gdp[m];
                 sp += pop[m];
+                if (m < areaRaw.Length) sa += areaRaw[m]; // 面积格数合计
             }
             switch (_sortKey)
             {
                 case 1: return sp;
                 case 2: return sp > 0 ? sg / sp : 0;
+                case 4: return sa > 0 ? sg / (sa * 64.0) : 0; // 地均GDP = GDP/面积 m²
+                case 5: return sa > 0 ? sp * 1000000.0 / (sa * 64.0) : 0; // 人口密度 = 人口/面积 km²
                 default: return sg;
             }
+        }
+
+        /// <summary>全区（所有原版区划）自身 GDP 合计，作为占全图比率的分母。</summary>
+        private double TotalGdp(double[] gdp)
+        {
+            double t = 0;
+            foreach (ushort did in _hub.GetVanillaDistricts()) t += gdp[did];
+            return t;
+        }
+
+        /// <summary>全区（所有原版区划）人口合计，作为占全图比率的分母。</summary>
+        private long TotalPop(long[] pop)
+        {
+            long t = 0;
+            foreach (ushort did in _hub.GetVanillaDistricts()) t += pop[did];
+            return t;
+        }
+
+        /// <summary>组合成员 GDP 自身值合计（用于占全图比率）。</summary>
+        private double GroupGdp(int gi, double[] gdp)
+        {
+            double s = 0;
+            foreach (ushort m in Groups[gi].Members) s += gdp[m];
+            return s;
+        }
+
+        /// <summary>组合成员人口合计（用于占全图比率）。</summary>
+        private long GroupPop(int gi, long[] pop)
+        {
+            long s = 0;
+            foreach (ushort m in Groups[gi].Members) s += pop[m];
+            return s;
+        }
+
+        /// <summary>数值对总量占比 × 100，格式如 "12.3%"。</summary>
+        private static string Share(double val, double total)
+        {
+            if (total <= 0) return "0.0%";
+            return (val / total * 100.0).ToString("0.0") + "%";
         }
 
         /// <summary>选中一个区划：取消组合选择。</summary>

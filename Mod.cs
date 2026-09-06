@@ -73,6 +73,13 @@ namespace DistrictFinanceManager
                 _settings.ShowDebug,
                 value => { _settings.ShowDebug = value; _settings.Save(); });
 
+            helper.AddSpace(4);
+
+            helper.AddCheckbox(
+                "按系统语言自动切换面板（非简/繁中→英文）/ Auto language",
+                _settings.AutoLanguage,
+                value => { _settings.AutoLanguage = value; _settings.Save(); });
+
             helper.AddSpace(16);
 
             // 居民/工人权重（GDP 贡献）

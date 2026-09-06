@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using ColossalFramework;
 using UnityEngine;
 
@@ -69,6 +71,72 @@ namespace DistrictFinanceManager
                 CurrentResWeight = Settings.ResidentWeight;
                 CurrentWorkWeight = Settings.WorkerWeight;
             }
+
+            ApplyAutoLanguage();
+        }
+
+        /// <summary>
+        /// 打开存档时按系统（Steam）默认语言自动切换面板语言：
+        /// 若不是简体/繁体中文则切换为英文。可通过设置 AutoLanguage 关闭。
+        /// </summary>
+        private void ApplyAutoLanguage()
+        {
+            try
+            {
+                if (Settings == null || !Settings.AutoLanguage) return;
+                string steamLang = GetSteamLanguage(); // 形如 schinese / tchinese / english / japanese
+                bool isZh = !string.IsNullOrEmpty(steamLang)
+                    && steamLang.ToLowerInvariant().Contains("chinese");
+                string target = isZh ? "zh" : "en";
+                if (Settings.Language != target)
+                {
+                    Settings.Language = target;
+                    Settings.Save();
+                }
+                Loc.Lang = target;
+                Debug.Log("[DFM] Auto language -> " + target + " (steam=" + steamLang + ")");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[DFM] ApplyAutoLanguage failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>读取游戏当前 UI 语言代码（如 schinese/tchinese/english），取不到时返回 null。</summary>
+        private static string GetSteamLanguage()
+        {
+            try
+            {
+                // 1) SteamHelper 的语言相关静态属性
+                Type t = typeof(SteamHelper);
+                foreach (PropertyInfo p in t.GetProperties(BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (p.Name.IndexOf("Language", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        object v = p.GetValue(null, null);
+                        if (v != null) return v.ToString();
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                // 2) 回退：Steamworks.SteamApps.GetCurrentGameLanguage()
+                Type apps = Type.GetType("Steamworks.SteamApps, Steamworks.NET")
+                         ?? Type.GetType("Steamworks.SteamApps, Steamworks");
+                if (apps != null)
+                {
+                    MethodInfo m = apps.GetMethod("GetCurrentGameLanguage",
+                        BindingFlags.Public | BindingFlags.Static);
+                    if (m != null)
+                    {
+                        object v = m.Invoke(null, null);
+                        if (v != null) return v.ToString();
+                    }
+                }
+            }
+            catch { }
+            return null;
         }
 
         /// <summary>

@@ -258,6 +258,35 @@ namespace DistrictFinanceManager
             return cnt;
         }
 
+        /// <summary>聚合面积（格数）：层级树内每个节点 = 自身 + 全部下辖面积，供「地均GDP」等按面积指标使用；未入树的已创建区划 = 自身面积。</summary>
+        public long[] GetAggregateArea()
+        {
+            long[] self = GetDistrictArea();
+            long[] agg = new long[256];
+            for (int i = 0; i < 256; i++) agg[i] = self[i];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Hierarchy == null) return agg;
+
+            long[] aSum = new long[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                AccumArea(root, self, aSum, hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited)) agg[id] = aSum[id];
+            return agg;
+        }
+
+        private static void AccumArea(ushort d, long[] self, long[] aSum, DistrictHierarchy h, HashSet<ushort> visited)
+        {
+            if (!visited.Add(d)) return;
+            long s = System.Math.Max(0, self[d]);
+            foreach (ushort child in h.GetChildren(d))
+            {
+                AccumArea(child, self, aSum, h, visited);
+                s += aSum[child];
+            }
+            aSum[d] = s;
+        }
+
 /// <summary>所有原版区划的居民数（按区划ID索引），直接读游戏数据，用于人口排序。</summary>
         public long[] GetDistrictPopulation()
         {
@@ -671,7 +700,7 @@ namespace DistrictFinanceManager
             return 3.0;
         }
 
-        /// <summary>现实化数据换算系数（GDP/人均）：0 原版按周×1，1 原版按年×52，2 人民币×3500，3 美元×500。（地价另按 ×420/×60 换算）</summary>
+        /// <summary>现实化数据换算系数（GDP/人均）：0 原版按周×1，1 原版按年×52，2 人民币×2625，3 美元×375。（地价另按 ×420/×60 换算）</summary>
         public static double GetDisplayFactor()
         {
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
@@ -680,8 +709,8 @@ namespace DistrictFinanceManager
                 switch (hub.Settings.DisplayMode)
                 {
                     case 1: return 52.0;
-                    case 2: return 3500.0;
-                    case 3: return 500.0;
+                    case 2: return 2625.0; // 人民币年化
+                    case 3: return 375.0;  // 美元年化
                 }
             }
             return 1.0;
