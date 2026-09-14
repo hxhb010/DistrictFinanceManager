@@ -31,7 +31,8 @@ namespace DistrictFinanceManager
             public int Workers;           // 工作人数
             public int LandValue;         // 地价（0~255）
             public int BuildingCount;
-            public long Area;             // 本区划面积（64 m² 格数）
+            public double Area;           // 本区划面积（m²，区划网格 alpha×368.64 加权）
+            public double BuiltArea;      // 建成区面积（m² = Σ本区划内建筑占地格数 × 64）
             // 各类型区域人口（调试用）
             public int ResPop;            // 住宅居住
             public int ComWorkers;        // 商业工人
@@ -53,7 +54,8 @@ namespace DistrictFinanceManager
             public int AggPopulation;
             public int AggWorkers;
             public int AggBuildings;
-            public long AggArea;          // 聚合面积（含下辖所有子区划，64 m² 格数）
+            public double AggArea;        // 聚合面积（含下辖所有子区划，m²）
+            public double AggBuiltArea;   // 聚合建成区面积（m²）
             // 聚合各类型人口（调试用）
             public int AggResPop;
             public int AggComWorkers;
@@ -96,12 +98,18 @@ namespace DistrictFinanceManager
             _districtPop = null;
             _districtArea = null;
             _districtAreaTime = 0f;
+            _builtDelta = null;
+            _builtDeltaTime = 0f;
+            _districtBuiltArea = null;
+            _districtBuiltAreaTime = 0f;
             _totalCityGDP = 0;
             _totalCityGDPTime = 0f;
             _avgLandValue = 0;
             _avgLandValueTime = 0f;
             _allDensity = null;
             _allDensityTime = 0f;
+            // 注意：不要清 _allBuiltCells —— 它是建筑占地统计（与设置/权重无关），
+            // 且跨周采样前会先 ClearCache，若清掉会导致采样读到的建成面积为 0。
         }
 
         private static ushort _logDistrict;
@@ -113,8 +121,12 @@ namespace DistrictFinanceManager
         private float _districtGDPTime;
         private long[] _districtPop;
         private float _districtPopTime;
-        private long[] _districtArea;
+        private double[] _districtArea;
         private float _districtAreaTime;
+        private double[] _builtDelta;         // 建成区价值增量缓存（每区划）
+        private float _builtDeltaTime;
+        private double[] _districtBuiltArea;  // 建成区面积缓存
+        private float _districtBuiltAreaTime;
         private static System.Reflection.FieldInfo _incomeField;
         private static System.Reflection.FieldInfo _totalIncomeField;
 
@@ -196,7 +208,7 @@ namespace DistrictFinanceManager
             long[] selfLong = GetDistrictLandValue();
             double[] self = new double[256];
             for (int i = 0; i < 256; i++) self[i] = selfLong[i];
-            long[] area = GetDistrictArea();
+            double[] area = GetDistrictArea();
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             double[] agg = new double[256];
             for (int i = 0; i < 256; i++) agg[i] = self[i];
@@ -213,7 +225,7 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>后序累加：先算完子节点子树，再把 子节点子树 累进父节点，得到每个节点自身的子树合计。</summary>
-        private static void AccumLand(ushort d, double[] self, long[] area, double[] lsum, double[] wsum, DistrictHierarchy h, HashSet<ushort> visited)
+        private static void AccumLand(ushort d, double[] self, double[] area, double[] lsum, double[] wsum, DistrictHierarchy h, HashSet<ushort> visited)
         {
             if (!visited.Add(d)) return;
             double l = self[d] * System.Math.Max(1, area[d]);
@@ -228,25 +240,31 @@ namespace DistrictFinanceManager
             wsum[d] = w;
         }
 
-        /// <summary>区划精确面积：遍历区划网格逐格统计格数（缓存 CACHE_LIFE）。</summary>
-        public long[] GetDistrictArea()
+        /// <summary>
+        /// 区划面积（平方米）：遍历区划网格逐格，按每格的覆盖权重累加。
+        /// 每格 19.2 m × 19.2 m = 368.64 m²；m_alpha(0~255) 表示该格被区划覆盖的比例，
+        /// 故贡献 = (m_alpha/255) × 368.64。边缘半格/多区重叠由 alpha 精确计（缓存 CACHE_LIFE）。
+        /// </summary>
+        public double[] GetDistrictArea()
         {
             if (_districtArea != null && Time.time - _districtAreaTime < CacheLife())
                 return _districtArea;
-            long[] cnt = new long[256];
+            double[] cnt = new double[256];
             try
             {
                 DistrictManager dm = Singleton<DistrictManager>.instance;
                 if (dm == null) return cnt;
                 DistrictManager.Cell[] grid = dm.m_districtGrid;
                 if (grid == null) return cnt;
+                double cellArea = (double)DistrictManager.DISTRICTGRID_CELL_SIZE
+                                * (double)DistrictManager.DISTRICTGRID_CELL_SIZE; // 19.2×19.2 = 368.64 m²
                 for (int i = 0; i < grid.Length; i++)
                 {
                     DistrictManager.Cell c = grid[i];
-                    cnt[c.m_district1]++;
-                    cnt[c.m_district2]++;
-                    cnt[c.m_district3]++;
-                    cnt[c.m_district4]++;
+                    if (c.m_district1 != 0 && c.m_alpha1 != 0) cnt[c.m_district1] += (c.m_alpha1 / 255.0) * cellArea;
+                    if (c.m_district2 != 0 && c.m_alpha2 != 0) cnt[c.m_district2] += (c.m_alpha2 / 255.0) * cellArea;
+                    if (c.m_district3 != 0 && c.m_alpha3 != 0) cnt[c.m_district3] += (c.m_alpha3 / 255.0) * cellArea;
+                    if (c.m_district4 != 0 && c.m_alpha4 != 0) cnt[c.m_district4] += (c.m_alpha4 / 255.0) * cellArea;
                 }
             }
             catch (System.Exception ex)
@@ -258,16 +276,16 @@ namespace DistrictFinanceManager
             return cnt;
         }
 
-        /// <summary>聚合面积（格数）：层级树内每个节点 = 自身 + 全部下辖面积，供「地均GDP」等按面积指标使用；未入树的已创建区划 = 自身面积。</summary>
-        public long[] GetAggregateArea()
+        /// <summary>聚合面积（m²）：层级树内每个节点 = 自身 + 全部下辖面积，供「地均GDP」等按面积指标使用；未入树的已创建区划 = 自身面积。</summary>
+        public double[] GetAggregateArea()
         {
-            long[] self = GetDistrictArea();
-            long[] agg = new long[256];
+            double[] self = GetDistrictArea();
+            double[] agg = new double[256];
             for (int i = 0; i < 256; i++) agg[i] = self[i];
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             if (hub == null || hub.Hierarchy == null) return agg;
 
-            long[] aSum = new long[256];
+            double[] aSum = new double[256];
             var visited = new HashSet<ushort>();
             foreach (ushort root in hub.Hierarchy.GetRootNodes())
                 AccumArea(root, self, aSum, hub.Hierarchy, visited);
@@ -275,16 +293,161 @@ namespace DistrictFinanceManager
             return agg;
         }
 
-        private static void AccumArea(ushort d, long[] self, long[] aSum, DistrictHierarchy h, HashSet<ushort> visited)
+        private static void AccumArea(ushort d, double[] self, double[] aSum, DistrictHierarchy h, HashSet<ushort> visited)
         {
             if (!visited.Add(d)) return;
-            long s = System.Math.Max(0, self[d]);
+            double s = System.Math.Max(0, self[d]);
             foreach (ushort child in h.GetChildren(d))
             {
                 AccumArea(child, self, aSum, h, visited);
                 s += aSum[child];
             }
             aSum[d] = s;
+        }
+
+        /// <summary>建成区数据是否已就绪（首次建筑遍历完成后为 true）。采样前用它把关。</summary>
+        public bool BuiltAreaReady { get { return _allBuiltCells != null; } }
+
+        /// <summary>每区划建成区面积（m²）= Σ本区划内建筑占地格数 × 64。由密度分片遍历顺带统计（结果缓存）。</summary>
+        public double[] GetDistrictBuiltArea()
+        {
+            if (_districtBuiltArea != null && Time.time - _districtBuiltAreaTime < CacheLife())
+                return _districtBuiltArea;
+            double[] r = new double[256];
+            Dictionary<ushort, long> cells = _allBuiltCells;
+            if (cells != null)
+            {
+                foreach (KeyValuePair<ushort, long> kv in cells)
+                    if (kv.Key < 256) r[kv.Key] = kv.Value * 64.0;
+            }
+            _districtBuiltArea = r;
+            _districtBuiltAreaTime = Time.time;
+            return r;
+        }
+
+        /// <summary>聚合建成区面积（m²，含下辖所有子区划，递归；复用 AccumArea 后序累加）。</summary>
+        public double[] GetAggregateBuiltArea()
+        {
+            double[] self = GetDistrictBuiltArea();
+            double[] agg = new double[256];
+            for (int i = 0; i < 256; i++) agg[i] = self[i];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Hierarchy == null) return agg;
+            double[] aSum = new double[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                AccumArea(root, self, aSum, hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited)) agg[id] = aSum[id];
+            return agg;
+        }
+
+        /// <summary>
+        /// 建筑价值增量（每区划）：**当前值用实时数据**（实时建成区面积 × 当前地价 × LandMult），
+        /// 基准值取周库里的"目标周"（= 最新历史周 − N）。N = 年化(1/2/3)? 52 : 1 周。
+        /// 年化时若库里**有一年前的数据**就用一年前那周；**不足一个周期才用最早的有效周（初值）**。
+        /// 结果按 CacheLife 缓存（约 10 秒），建成区面积随建筑分片遍历刷新（约 30 秒）。
+        /// </summary>
+        public double[] GetDistrictBuiltValueDelta()
+        {
+            if (_builtDelta != null && Time.time - _builtDeltaTime < CacheLife())
+                return _builtDelta;
+            double[] r = new double[256];
+            try
+            {
+                DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+                DistrictSeriesDB series = hub != null ? hub.Series : null;
+                if (series != null && series.HasAny)
+                {
+                    double mult = LandMultForCalc();
+                    int n = PeriodWeeksForCalc();
+                    int bi = SeriesFieldIndex("BuiltArea");
+                    double[] liveBuilt = GetDistrictBuiltArea(); // 实时建成区面积（m²）
+                    long[] liveLand = GetDistrictLandValue();    // 实时地价
+                    for (ushort id = 1; id < 256; id++)
+                    {
+                        List<uint> ws = series.SeriesWeeks(id);
+                        if (ws.Count == 0) continue;
+
+                        uint curW = ws[ws.Count - 1]; // 最新已记录的周
+                        // 当前值是实时的（处在"最新已记录周"的下一周），故目标周 = (最新已记录周 + 1) − N：
+                        //   周化(N=1) → 上一周（最新已记录那周）；年化(N=52) → 约一年前那周。
+                        long target = (long)curW + 1 - n;
+
+                        // 基准：取 ≤目标周 的最近"有效"周（建成区>0）。年化且有一年前数据时，这就是一年前那周。
+                        uint pastW = 0; bool havePast = false;
+                        for (int i = 0; i < ws.Count; i++)
+                        {
+                            if (series.GetValue(id, ws[i], bi) <= 0.0) continue; // 跳过垃圾周
+                            if ((long)ws[i] <= target) { pastW = ws[i]; havePast = true; }
+                            else break;
+                        }
+                        if (!havePast) // 数据不足一个周期 → 才用最早的"有效"周（初值）
+                        {
+                            for (int i = 0; i < ws.Count; i++)
+                                if (series.GetValue(id, ws[i], bi) > 0.0) { pastW = ws[i]; havePast = true; break; }
+                        }
+                        if (!havePast) continue;
+
+                        // 当前 = 实时；基准 = 周库目标周
+                        double cur = liveBuilt[id] * (double)liveLand[id] * mult;
+                        double past = SeriesBuiltValue(series, id, pastW, mult);
+                        r[id] = cur - past;
+                    }
+                }
+            }
+            catch (System.Exception ex) { Debug.LogWarning("[DFM] BuiltValueDelta failed: " + ex.Message); }
+            _builtDelta = r;
+            _builtDeltaTime = Time.time;
+            return r;
+        }
+
+        /// <summary>聚合建成区价值增量（含下辖所有子区划，递归；供分级排名视图用）。</summary>
+        public double[] GetAggregateBuiltValueDelta()
+        {
+            double[] self = GetDistrictBuiltValueDelta();
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Hierarchy == null) return self;
+            double[] agg = new double[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                ComputeAggregate(root, self, agg, hub.Hierarchy, visited);
+            return agg;
+        }
+
+        private static double SeriesBuiltValue(DistrictSeriesDB series, ushort id, uint week, double mult)
+        {
+            int bi = SeriesFieldIndex("BuiltArea");
+            int li = SeriesFieldIndex("LandValue");
+            double built = bi >= 0 ? series.GetValue(id, week, bi) : 0.0;
+            double land = li >= 0 ? series.GetValue(id, week, li) : 0.0;
+            return built * land * mult;
+        }
+
+        private static int SeriesFieldIndex(string name)
+        {
+            for (int i = 0; i < DistrictSeriesDB.FIELDS.Length; i++)
+                if (DistrictSeriesDB.FIELDS[i] == name) return i;
+            return -1;
+        }
+
+        /// <summary>地价显示倍率（RMB ×420 / USD ×60），与面板 LandMult() 口径一致。</summary>
+        private static double LandMultForCalc()
+        {
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Settings != null)
+            {
+                if (hub.Settings.DisplayMode == 2) return 420.0;
+                if (hub.Settings.DisplayMode == 3) return 60.0;
+            }
+            return 1.0;
+        }
+
+        /// <summary>周期周数：年化(1/2/3) = 52 周；周化(0) = 1 周。</summary>
+        private static int PeriodWeeksForCalc()
+        {
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Settings != null && hub.Settings.DisplayMode != 0) return 52;
+            return 1;
         }
 
 /// <summary>所有原版区划的居民数（按区划ID索引），直接读游戏数据，用于人口排序。</summary>
@@ -402,7 +565,8 @@ namespace DistrictFinanceManager
                     d.m_officeData.m_finalBuildingCount +
                     d.m_playerData.m_finalBuildingCount;
 
-                r.Area = GetDistrictArea()[districtId]; // 面积（64 m² 格数，逐格统计缓存）
+                r.Area = GetDistrictArea()[districtId]; // 面积（m²，区划网格 alpha 加权）
+                r.BuiltArea = GetDistrictBuiltArea()[districtId]; // 建成区面积（m²，建筑占地格数×64）
 
                 r.GDP = CalcGDP(d, r.LandValue, r.Population,
                     r.ComWorkers, r.IndWorkers, r.OffWorkers, r.PlayerWorkers);
@@ -418,6 +582,7 @@ namespace DistrictFinanceManager
                 r.AggWorkers = r.Workers;
                 r.AggBuildings = r.BuildingCount;
                 r.AggArea = r.Area;
+                r.AggBuiltArea = r.BuiltArea;
                 r.AggResPop = r.ResPop;
                 r.AggComWorkers = r.ComWorkers;
                 r.AggIndWorkers = r.IndWorkers;
@@ -462,6 +627,7 @@ namespace DistrictFinanceManager
                 r.AggWorkers += c.Workers;
                 r.AggBuildings += c.BuildingCount;
                 r.AggArea += c.Area;
+                r.AggBuiltArea += c.BuiltArea;
                 r.AggResPop += c.ResPop;
                 r.AggComWorkers += c.ComWorkers;
                 r.AggIndWorkers += c.IndWorkers;
@@ -653,6 +819,10 @@ namespace DistrictFinanceManager
         private Dictionary<ushort, DensityData> _densityPartial;
         private static readonly Dictionary<ushort, DensityData> _emptyDensity = new Dictionary<ushort, DensityData>();
 
+        // 建成区：每区划的建成格数（Σ 建筑 m_width×m_length，每格 64 m²），在密度分片遍历里顺带统计
+        private Dictionary<ushort, long> _allBuiltCells;
+        private Dictionary<ushort, long> _builtCellsPartial;
+
         private static double _avgLandValue;
         private static float _avgLandValueTime;
 
@@ -757,6 +927,7 @@ namespace DistrictFinanceManager
                     _densityProgress = 1;
                     _densityPerTick = System.Math.Max(1u, _densityTotal / (uint)period);
                     _densityPartial = new Dictionary<ushort, DensityData>();
+                    _builtCellsPartial = new Dictionary<ushort, long>();
                     _densityBuilding = true;
                 }
 
@@ -767,6 +938,7 @@ namespace DistrictFinanceManager
                 if (_densityProgress >= _densityTotal)
                 {
                     _allDensity = _densityPartial;
+                    _allBuiltCells = _builtCellsPartial;
                     _allDensityTime = Time.time;
                     _densityBuilding = false;
                 }
@@ -798,6 +970,11 @@ namespace DistrictFinanceManager
                 if (info == null) continue;
                 byte d = dm.GetDistrict(b.m_position);
                 if (d == 0) continue;
+
+                // 建成区：本建筑占地格数（m_width×m_length，每格 64 m²）—— 不限用途，凡建成即计
+                long bc;
+                _builtCellsPartial.TryGetValue(d, out bc);
+                _builtCellsPartial[d] = bc + (long)b.m_width * (long)b.m_length;
 
                 DensityData dd;
                 if (!_densityPartial.TryGetValue(d, out dd)) dd = new DensityData();

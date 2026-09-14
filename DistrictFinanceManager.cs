@@ -18,6 +18,8 @@ namespace DistrictFinanceManager
         {
             if (_instance != null)
             {
+                if (_instance._series != null)
+                    DistrictSeriesStore.Flush(_instance._series, _instance.SaveName);
                 if (_instance.Hierarchy != null)
                     DistrictDataStore.Save(_instance.Hierarchy, _instance.SaveName);
                 _instance.Hierarchy = null;
@@ -45,6 +47,13 @@ namespace DistrictFinanceManager
         private float _saveTimer;
         private bool _dirty;
         private float _densityTick;
+        private uint _lastWeek = uint.MaxValue;   // 上次采样的原版游戏周
+        private DistrictSeriesDB _series;         // 周度时间序列库
+        private uint _pendingWeek;                // 待采样的周（等建成区数据就绪再采）
+        private bool _hasPendingWeek;
+
+        /// <summary>周度时间序列数据库（按原版游戏周记录各区划全字段，供增速/增量使用）。</summary>
+        public DistrictSeriesDB Series { get { return _series; } }
 
         private void Awake()
         {
@@ -71,6 +80,13 @@ namespace DistrictFinanceManager
                 CurrentResWeight = Settings.ResidentWeight;
                 CurrentWorkWeight = Settings.WorkerWeight;
             }
+
+            // 周度时间序列库：读档加载历史；当前周若尚未记录则先补记一条（避免读档当周漏记）
+            _series = new DistrictSeriesDB();
+            DistrictSeriesStore.Load(_series, SaveName);
+            _lastWeek = GameWeek.CurrentWeek;
+            // 当前周若尚未记录 → 排队，等建成区数据就绪再采（避免把「建成区=0」的垃圾周写进库）
+            if (!_series.HasWeek(_lastWeek)) { _pendingWeek = _lastWeek; _hasPendingWeek = true; }
 
             ApplyAutoLanguage();
         }
@@ -213,6 +229,21 @@ namespace DistrictFinanceManager
 
         private void Update()
         {
+            // 原版游戏周边界检测（帧数法，对 RealTime 等真实时间模组免疫）：跨周则排队采样
+            if (GameWeek.Tick(ref _lastWeek))
+            {
+                if (Calculator != null) Calculator.ClearCache(); // 丢弃上一周缓存，按最新重算
+                _pendingWeek = _lastWeek;
+                _hasPendingWeek = true;
+            }
+            // 建成区数据就绪后才真正采样（否则会把「建成区=0」写成基准，污染增量）
+            if (_hasPendingWeek && Calculator != null && Calculator.BuiltAreaReady)
+            {
+                SampleWeek(_pendingWeek);
+                _hasPendingWeek = false;
+                MarkDirty();
+            }
+
             // 每秒遍历一部分建筑，自动保存间隔秒完成整体密度遍历（避免卡顿）
             _densityTick -= Time.deltaTime;
             if (_densityTick <= 0f)
@@ -228,13 +259,46 @@ namespace DistrictFinanceManager
                 {
                     DistrictDataStore.Save(Hierarchy, SaveName);
                     DistrictDataStore.SaveGroups(Groups, SaveName);
+                    if (_series != null) DistrictSeriesStore.Flush(_series, SaveName);
                     _dirty = false;
                 }
             }
         }
 
+        /// <summary>
+        /// 采样一周：对每个已创建的原版区划取一条 FinanceResult 全字段快照，追加进序列库。
+        /// 每周仅调用一次（由 Update 的周边界检测触发 / Awake 补记）。
+        /// </summary>
+        private void SampleWeek(uint week)
+        {
+            try
+            {
+                if (_series == null || Calculator == null) return;
+
+                ushort[] ids = GetVanillaDistricts();
+                var rows = new System.Collections.Generic.Dictionary<ushort, double[]>();
+                for (int i = 0; i < ids.Length; i++)
+                {
+                    ushort id = ids[i];
+                    if (id == 0) continue;
+                    string nm = GetVanillaDistrictName(id);
+                    if (!string.IsNullOrEmpty(nm)) _series.Names[id] = nm;
+                    DistrictFinanceCalculator.FinanceResult r = Calculator.Calculate(id);
+                    if (!r.IsValid) continue;
+                    rows[id] = DistrictSeriesDB.ToRow(r);
+                }
+
+                long ticks = 0L;
+                try { ticks = GameWeek.VanillaDate.Ticks; } catch { }
+                _series.UpsertWeek(week, ticks, rows); // 按真实游戏周存；同周重复记录则以最新为准（回档覆盖）
+                Debug.Log("[DFM] Series sampled week " + week + " (" + rows.Count + " districts)");
+            }
+            catch (System.Exception ex) { Debug.LogWarning("[DFM] SampleWeek failed: " + ex.Message); }
+        }
+
         private void OnDestroy()
         {
+            if (_series != null) DistrictSeriesStore.Flush(_series, SaveName);
             if (_dirty && Hierarchy != null)
             {
                 DistrictDataStore.Save(Hierarchy, SaveName);

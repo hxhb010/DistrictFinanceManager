@@ -71,6 +71,9 @@
     <Compile Include="Mod.cs" />
     <Compile Include="LoadingExtension.cs" />
     <Compile Include="DistrictDataModel.cs" />
+    <Compile Include="GameWeek.cs" />
+    <Compile Include="DistrictSeriesDB.cs" />
+    <Compile Include="DistrictSeriesStore.cs" />
     <Compile Include="DistrictDataStore.cs" />
     <Compile Include="DistrictFinanceCalculator.cs" />
     <Compile Include="DistrictFinancePanel.cs" />

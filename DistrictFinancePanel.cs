@@ -51,9 +51,9 @@ namespace DistrictFinanceManager
             new Color(0.70f, 0.30f, 1.0f),  // 紫
         };
 
-        // 人均GDP 分档阈值（15 个，对应 16 档颜色）
+        // 人均GDP 分档阈值（15 个，对应 16 档颜色）—— 原档 ×1.5（四舍五入）
         private static readonly long[] PCAP_TIERS =
-            { 5, 10, 15, 20, 25, 30, 40, 50, 65, 80, 100, 120, 150, 180, 220 };
+            { 8, 15, 23, 30, 38, 45, 60, 75, 98, 120, 150, 180, 225, 270, 330 };
 
         // GDP 分档阈值（15 个，对应 16 档颜色）
         // 每级 = 人均GDP 分档 × 人口分档对应值（逐级相乘），多取整一点
@@ -67,6 +67,27 @@ namespace DistrictFinanceManager
         // 地价分档阈值（15 个，对应 16 档颜色）—— 每 8 一档（原版 kr/m² 基准）
         private static readonly long[] LAND_TIERS =
             { 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120 };
+
+        // 地均GDP 分档阈值（15 个，对应 16 档颜色）—— 基准为「原版周化(×1)」下的地均GDP（货币/m²）。
+        // = 真实 $/m² 档 ÷ 375（美元模式系数）再四舍五入到两位；乘 GetDisplayFactor 后：
+        //   美元(×375) 还原真实 $/m²、人民币(×2625)=×7、原版(×52)=×52。
+        private static readonly double[] GDP_AREA_TIERS =
+            { 0, 0.01, 0.02, 0.05, 0.13, 0.32, 0.8, 2.13, 5.33, 13.33, 32, 66.67, 133.33, 266.67, 533.33 };
+
+        // 人口密度分档阈值（15 个，对应 16 档颜色）—— 按现实人口密度（人/km²）划分，
+        // 覆盖无人区 <5 → 超密城市核心 >6万，对数递增。
+        private static readonly long[] POP_DENSITY_TIERS =
+            { 5, 15, 40, 90, 200, 400, 800, 1500, 3000, 6000, 12000, 20000, 32000, 45000, 60000 };
+
+        // 面积分档阈值（15 个，对应 16 档颜色）—— 单位 km²（从 0.01 小区划起，中位数≈2，50 km² 封顶）
+        private static readonly double[] AREA_TIERS =
+            { 0.01, 0.05, 0.1, 0.2, 0.4, 0.7, 1.2, 2, 3, 5, 8, 13, 20, 32, 50 };
+
+        // 建成区价值增量分档阈值（15 个，对应 16 档颜色）—— 以 0 为中心的发散档（kr 基准，周）。
+        // 索引 0–5 为负、索引 6 转正 → **0 落在黄色档 TIER_COLORS[6]（金黄）**；
+        // 负值→红端(0..5)、正值→绿紫端(7..15)。随 货币(LandMult) × 周期(周/年) 缩放。
+        private static readonly double[] BUILT_DELTA_TIERS =
+            { -5e7, -1e7, -2e6, -5e5, -1e5, -2e4, 5e3, 1e5, 5e5, 2e6, 1e7, 5e7, 2e8, 1e9, 5e9 };
 
         #endregion
 
@@ -110,6 +131,8 @@ namespace DistrictFinanceManager
         private UILabel _nameHintLb;
         private int _sortKey; // 0=GDP 1=人口 2=人均GDP
         private bool _modeDropOpen; // 现实化数据下拉展开状态
+        private bool _moreSortOpen; // 更多排序下拉展开状态
+        private float _moreBtnX, _moreBtnY; // 「更多 ▾」按钮位置（供最后绘制下拉用）
         private bool _helpVis; // 操作说明面板可见
         private Vector2 _helpPos = new Vector2(-1f, 100f);
         private bool _helpDragging;
@@ -124,7 +147,7 @@ namespace DistrictFinanceManager
         private float _lastWorkWeight = -1f;
         private int _lastDisplayMode = -1;
 
-        private GUIStyle _ti, _ts, _fl, _fv, _pcv, _btn, _bn2, _hdr, _nodeBtn, _diag, _legend, _rankBtn;
+        private GUIStyle _ti, _ts, _fl, _fv, _pcv, _btn, _btnWrap, _bn2, _hdr, _nodeBtn, _diag, _legend, _rankBtn, _shield;
         private bool _styled;
         private Texture2D _bgTex;
 
@@ -571,6 +594,33 @@ namespace DistrictFinanceManager
                 y = DrawLegend(PAD, y, PW - PAD * 2,
                     Loc.T("颜色图例 · 地价（" + LandUnit() + "）", "Legend · Land value (" + LandUnit() + ")"), GetLandDisplayTiers());
             }
+            else if (_sortKey == 4)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 地均GDP（" + CurrencySymbol() + "/m²）", "Legend · GDP/m² (" + CurrencySymbol() + "/m²)"), GetGdpAreaDisplayTiers());
+            }
+            else if (_sortKey == 5)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 人口密度（人/km²）", "Legend · Pop density (pop/km²)"), POP_DENSITY_TIERS);
+            }
+            else if (_sortKey == 6)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 面积（km²）", "Legend · Area (km²)"), AREA_TIERS);
+            }
+            else if (_sortKey == 7)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 建筑价值增量（" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "年" : "周") + "）",
+                          "Legend · Building value Δ (" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "yr" : "wk") + ")"),
+                    GetBuiltDeltaDisplayTiers());
+            }
+            else if (_sortKey == 8)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 建成区面积（km²）", "Legend · Built-up area (km²)"), AREA_TIERS);
+            }
             else
             {
                 y = DrawLegend(PAD, y, PW - PAD * 2,
@@ -619,13 +669,24 @@ namespace DistrictFinanceManager
                     _sortKey = i;
                 sx += 70;
             }
+            // 更多排序：下拉浮在列表上方（最后绘制），此处只放按钮、不占位
+            _moreBtnX = sx;
+            _moreBtnY = y;
+            if (GUI.Button(new Rect(sx, y, 54, BTN_H),
+                Loc.T("更多 ▾", "More ▾"), _sortKey >= 6 ? _bn2 : _btn))
+            {
+                _moreSortOpen = !_moreSortOpen;
+                if (_hub != null && _hub.Settings != null && _hub.Settings.ShowDebug)
+                    Debug.Log("[DFM] moreSort toggle open=" + _moreSortOpen + " key=" + _sortKey);
+            }
             y += BTN_H + GAP;
 
-            // ==== 列表 ====
-            Rect list = new Rect(PAD, y, PW - PAD * 2, PH - PAD - y);
+            // ==== 列表 ==== （右侧留出约 56px 给「更多 ▾」下拉那一列，避免下拉压到列表按钮而抢不到点击）
+            const float SORT_DROP_COL = 56f;
+            Rect list = new Rect(PAD, y, PW - PAD * 2 - SORT_DROP_COL, PH - PAD - y);
             if (_viewMode == 0)
                 y = DrawCityTotals(y, PW - PAD * 2); // 层级模式：树上方显示全区合计
-            list = new Rect(PAD, y, PW - PAD * 2, PH - PAD - y);
+            list = new Rect(PAD, y, PW - PAD * 2 - SORT_DROP_COL, PH - PAD - y);
             switch (_viewMode)
             {
                 case 1: DrawGroupView(list); break;                    // 组合
@@ -639,6 +700,35 @@ namespace DistrictFinanceManager
 
             // 最后绘制（浮在最上层），避免展开的下拉窗口被图例/列表遮挡
             DrawModeDropdown();
+            DrawMoreSortDropdown();
+        }
+
+        /// <summary>
+        /// 「更多 ▾」排序下拉：最后绘制、向下展开。列表已在其右侧留出空列（见 DrawPanel 的 SORT_DROP_COL），
+        /// 故下拉不再压到列表按钮，点击不会被列表抢走。
+        /// </summary>
+        private void DrawMoreSortDropdown()
+        {
+            if (!_moreSortOpen) return;
+            string[] more = Loc.IsEn ? new string[] { "Area", "Building value Δ", "Built-up area" } : new string[] { "面积", "建筑价值增量", "建成区面积" };
+            int[] moreKeys = new int[] { 6, 7, 8 }; // 追加更多排序项在此
+            Color oldBg = GUI.backgroundColor;
+            GUI.backgroundColor = Color.black; // 展开的下拉窗口背景纯黑
+            float dy = _moreBtnY + BTN_H + GAP;
+            for (int i = 0; i < more.Length; i++)
+            {
+                string lbl = more[i] + (moreKeys[i] == _sortKey ? " ✓" : "");
+                bool twoLine = _btn.CalcSize(new GUIContent(more[i])).x > 50f;
+                float ih = twoLine ? BTN_H * 2f : BTN_H;
+                Rect item = new Rect(_moreBtnX, dy, 54, ih);
+                if (GUI.Button(item, lbl, twoLine ? _btnWrap : _btn))
+                {
+                    _moreSortOpen = false;
+                    _sortKey = moreKeys[i];
+                }
+                dy += ih;
+            }
+            GUI.backgroundColor = oldBg;
         }
 
         /// <summary>面板右上角现实化数据下拉（标题栏下方 20，与选项联动）。</summary>
@@ -721,8 +811,8 @@ namespace DistrictFinanceManager
                     CollectNodes(c, depth + 1, ids, depths, visited);
         }
 
-        /// <summary>绘制单行树节点（y 由调用方绝对递增传入），非选中节点按聚合 GDP 着色。</summary>
-        private void DrawNodeRow(ushort id, int depth, float y, float w, double[] agg)
+        /// <summary>绘制单行树节点（y 由调用方绝对递增传入），非选中节点按当前排序键着色。</summary>
+        private void DrawNodeRow(ushort id, int depth, float y, float w, double[] aggVal)
         {
             float ind = depth * 14f;
             string name = _hub.GetVanillaDistrictName(id);
@@ -737,7 +827,7 @@ namespace DistrictFinanceManager
             bool selected = id == _hub.SelectedID;
             Color old = GUI.color;
             if (!selected)
-                GUI.color = GdpColor(agg[id]);
+                GUI.color = SortColor(_sortKey, aggVal[id]);
             GUIStyle st = selected ? _ts : _rankBtn;
             Rect row = new Rect(ind, y, w - ind, NODE_H);
             if (GUI.Button(row, prefix + tag + name, st))
@@ -791,10 +881,10 @@ namespace DistrictFinanceManager
             float cy = 0;
             float lw = list.width - 20;
 
-            double[] agg = _hub.Calculator.GetAggregateGDP();
+            double[] aggVal = BuildAggregateSortValues(); // 每节点按当前排序键的聚合值（着色跟随 _sortKey）
             cy = DrawHeader(cy, lw, Loc.T("— 已分配层级 / Assigned —", "— Assigned hierarchy —"));
             for (int i = 0; i < ids.Count; i++)
-                DrawNodeRow(ids[i], depths[i], cy + i * NODE_H, lw, agg);
+                DrawNodeRow(ids[i], depths[i], cy + i * NODE_H, lw, aggVal);
             cy += ids.Count * NODE_H;
 
             cy += GAP;
@@ -815,6 +905,21 @@ namespace DistrictFinanceManager
             GUI.EndScrollView();
         }
 
+        /// <summary>每区划在当前排序键下的「聚合」值（层级树节点着色用）。</summary>
+        private double[] BuildAggregateSortValues()
+        {
+            double[] gdp = _hub.Calculator.GetAggregateGDP();
+            long[] pop = _hub.Calculator.GetAggregatePopulation();
+            double[] land = LandToDisplay(_hub.Calculator.GetAggregateLandValue());
+            double[] m2 = AreaToM2(_hub.Calculator.GetAggregateArea());
+            double[] delta = _hub.Calculator.GetAggregateBuiltValueDelta();
+            double[] built = _hub.Calculator.GetAggregateBuiltArea();
+            double[] v = new double[256];
+            for (int i = 1; i < 256; i++)
+                v[i] = SortValue(_sortKey, (ushort)i, gdp, pop, land, m2, delta, built);
+            return v;
+        }
+
         /// <summary>是否通过筛选：开启筛选时——若选中组合则只保留该组合成员；
         /// 若选中区划则保留其层级下辖及祖先链；两者都无则全通过。</summary>
         private bool PassFilter(ushort did)
@@ -829,22 +934,20 @@ namespace DistrictFinanceManager
             return _hub.Hierarchy.IsDescendantOf(did, _hub.SelectedID);
         }
 
-        /// <summary>地均GDP = GDP / 面积(m²)，用于排序（面积 = 格数×64 m²，0 时返回 0）。</summary>
+        /// <summary>地均GDP = GDP / 面积(m²)，用于排序（0 时返回 0）。</summary>
         private static double GdpPerArea(ushort did, double[] gdp, double[] m2)
         {
             if (m2 == null || m2[did] <= 0) return 0.0;
             return gdp[did] / m2[did];
         }
 
-        /// <summary>把面积格数（long[]）换算成 m² 显示值 double[]（1 格 = 64 m²）。</summary>
-        private static double[] AreaToM2(long[] cells)
+        /// <summary>面积为已转换好的 m²（GetDistrictArea 直接返回 m²），此处透传。</summary>
+        private static double[] AreaToM2(double[] m2)
         {
-            double[] r = new double[cells.Length];
-            for (int i = 0; i < cells.Length; i++) r[i] = cells[i] * 64.0;
-            return r;
+            return m2;
         }
 
-        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null)
+        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null, double[] delta = null, double[] built = null)
         {
             switch (key)
             {
@@ -854,6 +957,9 @@ namespace DistrictFinanceManager
                 case 4: return GdpPerArea(did, gdp, m2);
                 case 5: // 人口密度 = 人口/面积(km²)；m2 为平方米，km² = m2/1e6，故 = pop*1e6/m2
                     return (m2 != null && m2[did] > 0) ? pop[did] * 1000000.0 / m2[did] : 0.0;
+                case 6: return m2 != null ? m2[did] : 0.0; // 面积（m²）
+                case 7: return delta != null ? delta[did] : 0.0; // 建筑价值增量
+                case 8: return built != null ? built[did] : 0.0; // 建成区面积（m²）
                 default: return gdp[did];
             }
         }
@@ -868,6 +974,14 @@ namespace DistrictFinanceManager
                 case 3: return value.ToString("0.00") + " " + LandUnit();
                 case 4: return cur + F(value) + Loc.T("/m²", "/m²");
                 case 5: return value.ToString("0.0") + Loc.T(" 人/km²", " pop/km²");
+                case 6: return AreaKm2(value) + Loc.T(" km²", " km²");
+                case 7: // 建筑价值增量（带符号；微小值归零，避免显示成 -0.00）
+                    {
+                        double v = System.Math.Abs(value) < 0.5 ? 0.0 : value;
+                        string sign = v > 0 ? "+" : (v < 0 ? "-" : "");
+                        return sign + cur + F(System.Math.Abs(v));
+                    }
+                case 8: return AreaKm2(value) + Loc.T(" km²", " km²"); // 建成区面积
                 default: return cur + F((long)value);
             }
         }
@@ -877,7 +991,11 @@ namespace DistrictFinanceManager
             if (key == 1) return PopColor((long)value);
             if (key == 2) return GdpPerCapitaColor(value);
             if (key == 3) return LandColor(value);
-            if (key == 4 || key == 5) return Color.white; // 地均GDP/人口密度不按数值着色
+            if (key == 4) return GdpAreaColor(value);      // 地均GDP：现实货币/m² 分档
+            if (key == 5) return PopDensityColor(value);   // 人口密度：人/km² 分档
+            if (key == 6) return AreaColor(value);         // 面积：km² 分档
+            if (key == 7) return BuiltDeltaColor(value);   // 建筑价值增量：以 0 为中心的对称分档
+            if (key == 8) return AreaColor(value);         // 建成区面积：与「面积」同一套 km² 分级
             return GdpColor(value);
         }
 
@@ -890,6 +1008,9 @@ namespace DistrictFinanceManager
                 case 3: return Loc.T("地价", "Land value");
                 case 4: return Loc.T("地均GDP", "GDP/m²");
                 case 5: return Loc.T("人口密度", "Population density");
+                case 6: return Loc.T("面积", "Area");
+                case 7: return Loc.T("建筑价值增量", "Building value Δ");
+                case 8: return Loc.T("建成区面积", "Built-up area");
                 default: return "GDP";
             }
         }
@@ -910,6 +1031,8 @@ namespace DistrictFinanceManager
             long[] pop = _hub.Calculator.GetDistrictPopulation();
             double[] landD = LandToDisplay(_hub.Calculator.GetDistrictLandValue());
             double[] m2 = AreaToM2(_hub.Calculator.GetDistrictArea());
+            double[] delta = _hub.Calculator.GetDistrictBuiltValueDelta();
+            double[] builtS = _hub.Calculator.GetDistrictBuiltArea();
             ushort[] all = _hub.GetVanillaDistricts();
 
             var items = new List<KeyValuePair<ushort, double>>();
@@ -917,7 +1040,7 @@ namespace DistrictFinanceManager
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2)));
+                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2, delta, builtS)));
             }
             items.Sort((a, b) => b.Value.CompareTo(a.Value)); // 降序
 
@@ -973,13 +1096,17 @@ namespace DistrictFinanceManager
             double[] selfLandD = LandToDisplay(_hub.Calculator.GetDistrictLandValue());
             double[] aggM2 = AreaToM2(_hub.Calculator.GetAggregateArea());
             double[] selfM2 = AreaToM2(_hub.Calculator.GetDistrictArea());
+            double[] aggDelta = _hub.Calculator.GetAggregateBuiltValueDelta();
+            double[] selfDelta = _hub.Calculator.GetDistrictBuiltValueDelta();
+            double[] aggBuiltS = _hub.Calculator.GetAggregateBuiltArea();
+            double[] selfBuiltS = _hub.Calculator.GetDistrictBuiltArea();
 
             var items = new List<RankEntry>();
             foreach (ushort did in _hub.Hierarchy.GetDistrictsByLevel(level))
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2), parentLevel = false });
+                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2, aggDelta, aggBuiltS), parentLevel = false });
             }
 
             // 加入上一级节点（直辖）：数值用其自身，不聚合
@@ -991,7 +1118,7 @@ namespace DistrictFinanceManager
                 {
                     if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                     if (!PassFilter(did)) continue;
-                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2), parentLevel = true });
+                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2, selfDelta, selfBuiltS), parentLevel = true });
                 }
             }
 
@@ -1047,7 +1174,9 @@ namespace DistrictFinanceManager
             double[] gdp = _hub.Calculator.GetDistrictGDP();
             long[] pop = _hub.Calculator.GetDistrictPopulation();
             long[] landRaw = _hub.Calculator.GetDistrictLandValue(); // 组合地价按成员面积加权平均
-            long[] areaRaw = _hub.Calculator.GetDistrictArea();
+            double[] areaRaw = _hub.Calculator.GetDistrictArea();
+            double[] deltaRaw = _hub.Calculator.GetDistrictBuiltValueDelta();
+            double[] builtRaw = _hub.Calculator.GetDistrictBuiltArea();
             ushort[] all = _hub.GetVanillaDistricts();
             float lw = list.width - 20;
             float x0 = list.x;
@@ -1096,7 +1225,7 @@ namespace DistrictFinanceManager
             long totalPop = TotalPop(pop);
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
-            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw)));
+            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw)));
 
             int toDelete = -1;
             for (int r = 0; r < order.Count; r++)
@@ -1104,7 +1233,7 @@ namespace DistrictFinanceManager
                 int gi = order[r];
                 GroupData g = Groups[gi];
                 bool active = gi == _activeGroupIdx;
-                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw);
+                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw);
                 string share = "";
                 if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(GroupGdp(gi, gdp), totalGdp);
                 else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(GroupPop(gi, pop), totalPop);
@@ -1391,7 +1520,7 @@ namespace DistrictFinanceManager
 
         /// <summary>组合的统计值（按排序依据）：GDP/人口为成员求和，人均=和/和；
         /// 地价为成员面积加权平均地价再随模式换算显示（避免把地价当 GDP 求和导致异常高）。</summary>
-        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, long[] areaRaw)
+        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, double[] areaRaw, double[] delta, double[] built)
         {
             GroupData g = Groups[idx];
 
@@ -1402,7 +1531,7 @@ namespace DistrictFinanceManager
                 foreach (ushort m in g.Members)
                 {
                     if (m >= landRaw.Length || m >= areaRaw.Length) continue;
-                    long a = areaRaw[m];
+                    double a = areaRaw[m];
                     if (a <= 0) continue;
                     lsum += landRaw[m] * a;
                     asum += a;
@@ -1410,19 +1539,24 @@ namespace DistrictFinanceManager
                 return asum > 0 ? (lsum / asum) * LandMult() : 0;
             }
 
-            double sg = 0, sp = 0, sa = 0;
+            double sg = 0, sp = 0, sa = 0, sd = 0, sb = 0;
             foreach (ushort m in g.Members)
             {
                 sg += gdp[m];
                 sp += pop[m];
-                if (m < areaRaw.Length) sa += areaRaw[m]; // 面积格数合计
+                if (m < areaRaw.Length) sa += areaRaw[m]; // 面积 m² 合计
+                if (delta != null && m < delta.Length) sd += delta[m]; // 建筑价值增量合计
+                if (built != null && m < built.Length) sb += built[m]; // 建成区面积合计
             }
             switch (_sortKey)
             {
                 case 1: return sp;
                 case 2: return sp > 0 ? sg / sp : 0;
-                case 4: return sa > 0 ? sg / (sa * 64.0) : 0; // 地均GDP = GDP/面积 m²
-                case 5: return sa > 0 ? sp * 1000000.0 / (sa * 64.0) : 0; // 人口密度 = 人口/面积 km²
+                case 4: return sa > 0 ? sg / sa : 0; // 地均GDP = GDP/面积 m²
+                case 5: return sa > 0 ? sp * 1000000.0 / sa : 0; // 人口密度 = 人口/面积 km²（sa 位 m²）
+                case 6: return sa; // 面积 m² 合计
+                case 7: return sd; // 建筑价值增量合计
+                case 8: return sb; // 建成区面积合计
                 default: return sg;
             }
         }
@@ -1474,12 +1608,14 @@ namespace DistrictFinanceManager
             _finDistrict = 0;
         }
 
-        /// <summary>清除当前选择（区划 + 组合）。</summary>
+        /// <summary>清除当前选择（区划 + 组合详情 + 组合行高亮）。</summary>
         private void ClearSelection()
         {
             _detailGroup = -1;
             _hub.SelectedID = 0;
             _finDistrict = 0;
+            _activeGroupIdx = -1; // 右键取消详情时同时取消组合行高亮
+            _memberExpand = false; // 并收起成员列表
         }
 
         /// <summary>选中一个组合，顶部显示其合计详情（清除区划选择）。</summary>
@@ -1492,7 +1628,7 @@ namespace DistrictFinanceManager
 
         /// <summary>组合成员自身值的合计：GDP/人口/工人/建筑/面积（只显示合计用）。</summary>
         private bool ComputeGroupTotals(int gi, out double gdp, out long pop,
-            out int workers, out int buildings, out long area)
+            out int workers, out int buildings, out double area)
         {
             gdp = 0; pop = 0; workers = 0; buildings = 0; area = 0;
             if (_hub == null || _hub.Calculator == null) return false;
@@ -1587,11 +1723,11 @@ namespace DistrictFinanceManager
             return n.ToString("F2");
         }
 
-        /// <summary>面积格数 → km² 文本（1 格 = 64 m²）。小于 0.1 km² 保留三位小数避免显示成 0.00。</summary>
-        private static string AreaKm2(long cells)
+        /// <summary>面积 m² → km² 文本。小于 0.1 km² 保留三位小数避免显示成 0.00。</summary>
+        private static string AreaKm2(double m2)
         {
-            if (cells <= 0) return "0";
-            double km2 = cells * 64.0 / 1000000.0;
+            if (m2 <= 0) return "0";
+            double km2 = m2 / 1000000.0;
             if (km2 >= 100) return km2.ToString("0.0");
             if (km2 >= 0.1) return km2.ToString("0.00");
             return km2.ToString("0.000");
@@ -1606,7 +1742,7 @@ namespace DistrictFinanceManager
             GUI.Label(new Rect(x, y, w, TITLE_H), "📊 " + Loc.T("组合 · ", "Group · ") + gname, _ti);
             y += TITLE_H;
 
-            double gdp; long pop; int workers, buildings; long area;
+            double gdp; long pop; int workers, buildings; double area;
             bool any = ComputeGroupTotals(_detailGroup, out gdp, out pop, out workers, out buildings, out area);
             if (!any)
             {
@@ -1777,6 +1913,17 @@ namespace DistrictFinanceManager
             return t;
         }
 
+        /// <summary>地均GDP 分档阈值（随货币换算：美元基准 ×1，人民币 ×7）。</summary>
+        /// <summary>地均GDP 分档阈值（随统计模式缩放，与 GDP/人均GDP 图例同口径）。</summary>
+        private static double[] GetGdpAreaDisplayTiers()
+        {
+            double f = DistrictFinanceCalculator.GetDisplayFactor();
+            if (f == 1.0) return GDP_AREA_TIERS;
+            double[] t = new double[GDP_AREA_TIERS.Length];
+            for (int i = 0; i < t.Length; i++) t[i] = GDP_AREA_TIERS[i] * f;
+            return t;
+        }
+
         /// <summary>GDP 分档颜色：与人均GDP 共用同一套 TIER_COLORS 渐变（用换算后阈值）。</summary>
         private static Color GdpColor(double gdp)
         {
@@ -1794,14 +1941,80 @@ namespace DistrictFinanceManager
             return TIER_COLORS[TIER_COLORS.Length - 1];
         }
 
-        /// <summary>绘制颜色图例：16 档颜色色块 + 各档阈值下限。返回新的 y。</summary>
+        /// <summary>地均GDP 分档颜色：复用 TIER_COLORS 渐变（随统计模式缩放）。</summary>
+        private static Color GdpAreaColor(double gdpArea)
+        {
+            double[] tiers = GetGdpAreaDisplayTiers();
+            for (int i = 0; i < tiers.Length; i++)
+                if (gdpArea < tiers[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
+        /// <summary>人口密度分档颜色：复用 TIER_COLORS 渐变（人/km²）。</summary>
+        private static Color PopDensityColor(double density)
+        {
+            for (int i = 0; i < POP_DENSITY_TIERS.Length; i++)
+                if (density < POP_DENSITY_TIERS[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
+        /// <summary>面积分档颜色：复用 TIER_COLORS 渐变（入参为 m²，按 km² 分档比对）。</summary>
+        private static Color AreaColor(double areaM2)
+        {
+            double km2 = areaM2 / 1000000.0;
+            for (int i = 0; i < AREA_TIERS.Length; i++)
+                if (km2 < AREA_TIERS[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
+        /// <summary>统计模式是否为"年化"（1/2/3）→ 周期取 52 周。</summary>
+        private static bool IsYearlyPeriod()
+        {
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            return hub != null && hub.Settings != null && hub.Settings.DisplayMode != 0;
+        }
+
+        /// <summary>建成区价值增量分档阈值：kr 基准 × 货币(LandMult) × 周期(周=1/年=52)。</summary>
+        private static double[] GetBuiltDeltaDisplayTiers()
+        {
+            double f = LandMult() * (IsYearlyPeriod() ? 52.0 : 1.0);
+            if (f == 1.0) return BUILT_DELTA_TIERS;
+            double[] t = new double[BUILT_DELTA_TIERS.Length];
+            for (int i = 0; i < t.Length; i++) t[i] = BUILT_DELTA_TIERS[i] * f;
+            return t;
+        }
+
+        /// <summary>建成区价值增量分档颜色：以 0 为中心的发散色（负→红端、0→中段、正→紫端）。</summary>
+        private static Color BuiltDeltaColor(double v)
+        {
+            double[] tiers = GetBuiltDeltaDisplayTiers();
+            for (int i = 0; i < tiers.Length; i++)
+                if (v < tiers[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
+        /// <summary>绘制颜色图例：16 档颜色色块 + 各档阈值下限。long[]/double[] 共用一套模板（返回新 y）。</summary>
         private float DrawLegend(float x, float y, float w, string title, long[] tiers)
+        {
+            string[] labels = new string[tiers.Length + 1];
+            for (int i = 0; i < labels.Length; i++) labels[i] = LegendLabel(tiers, i);
+            return DrawLegendCore(x, y, w, title, labels);
+        }
+
+        private float DrawLegend(float x, float y, float w, string title, double[] tiers)
+        {
+            string[] labels = new string[tiers.Length + 1];
+            for (int i = 0; i < labels.Length; i++) labels[i] = LegendLabel(tiers, i);
+            return DrawLegendCore(x, y, w, title, labels);
+        }
+
+        private float DrawLegendCore(float x, float y, float w, string title, string[] labels)
         {
             GUI.Label(new Rect(x, y, w, HEADER_H), title, _hdr);
             y += HEADER_H;
 
             const int COLS = 8;
-            int total = tiers.Length + 1; // 16 档颜色
+            int total = labels.Length; // 16 档颜色
             float sw = w / COLS;
             float sh = 12f;
             float th = 13f;
@@ -1818,7 +2031,7 @@ namespace DistrictFinanceManager
                 GUI.DrawTexture(new Rect(xx, yy, sw - 2f, sh), Texture2D.whiteTexture);
                 GUI.color = old;
 
-                GUI.Label(new Rect(xx, yy + sh + 1, sw, th), LegendLabel(tiers, i), _legend);
+                GUI.Label(new Rect(xx, yy + sh + 1, sw, th), labels[i], _legend);
             }
             return y + 2 * (sh + th);
         }
@@ -1828,6 +2041,26 @@ namespace DistrictFinanceManager
             if (idx == 0) return "<" + F(tiers[0]);
             if (idx >= tiers.Length) return "≥" + F(tiers[tiers.Length - 1]);
             return F(tiers[idx - 1]);
+        }
+
+        /// <summary>double 档标签：数值大(≥1000)用 K/M/B，小(面积 km²)用小数。面积图例 / 建成区增值图例共用。</summary>
+        private static string LegendLabel(double[] tiers, int idx)
+        {
+            if (idx == 0) return "<" + LegendNum(tiers[0]);
+            if (idx >= tiers.Length) return "≥" + LegendNum(tiers[tiers.Length - 1]);
+            return LegendNum(tiers[idx - 1]);
+        }
+        private static string LegendNum(double v)
+        {
+            double a = System.Math.Abs(v);
+            if (a >= 1000.0) return (v < 0 ? "-" : "") + F(a); // K/M/B
+            return Kml2S(v);
+        }
+        private static string Kml2S(double km2)
+        {
+            if (km2 >= 1) return km2.ToString("0.##");
+            if (km2 >= 0.1) return km2.ToString("0.0");
+            return km2.ToString("0.00");
         }
 
         private void MakeStyles()
@@ -1847,6 +2080,10 @@ namespace DistrictFinanceManager
             _rankBtn = MakeRowStyle(13, Color.white); // 白色文字，用于排名行按 GDP 着色
 
             _btn = MakeButtonStyle(12, Color.white);
+            _btnWrap = MakeButtonStyle(11, Color.white); // 可换行（「更多 ▾」下拉里的长条目用）
+            _btnWrap.wordWrap = true;
+            _btnWrap.alignment = TextAnchor.MiddleCenter;
+            _shield = new GUIStyle(); // 透明遮罩：吞掉落不到下拉条目上的点击，避免点穿到列表行
             _bn2 = MakeButtonStyle(12, Color.yellow);
             _bn2.normal.background = Tex(new Color(0.25f, 0.5f, 0.25f));
 
