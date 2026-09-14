@@ -182,7 +182,7 @@ namespace DistrictFinanceManager
             helper.AddSpace(8);
 
             helper.AddGroup("ℹ️ About");
-            helper.AddTextfield("Version 2.0",
+            helper.AddTextfield("Version 3.0",
                 "Use the vanilla district tool to paint/select districts.\n" +
                 "Press F9 to toggle the standalone panel:\n" +
                 "view finance and assign hierarchy levels there.\n" +

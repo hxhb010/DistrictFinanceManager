@@ -25,7 +25,9 @@ namespace DistrictFinanceManager
             "AggResLow", "AggResHigh", "AggComLow", "AggComHigh",
             "AggResLowGDP", "AggResHighGDP", "AggComLowGDP", "AggComHighGDP", "AggIndGDP", "AggOffGDP", "AggPlayerGDP",
             // 追加（index 43；改动须升 SeriesVersion）
-            "BuiltArea"
+            "BuiltArea",
+            // 追加（index 44）
+            "DisposableIncome"
         };
 
         /// <summary>已有的周号（唯一，升序）。</summary>
@@ -51,6 +53,44 @@ namespace DistrictFinanceManager
 
         public bool HasWeek(uint week) { return _weekRows.ContainsKey(week); }
 
+        /// <summary>
+        /// 把一个区划从周库里彻底抹掉（所有周的该行 + 名字缓存），返回抹掉的行数。
+        /// 用于 **ID 复用**：原版区划被删后 ID 会被回收，玩家新画的区划可能拿到同一个 ID，
+        /// 不该继承旧主人的历史（否则它的增量/增速会拿完全无关的另一块地当基准）。
+        /// 注意：只改内存。追加式文件里的旧行还在，需要配合 DistrictSeriesStore.Rewrite 才能落盘生效。
+        /// </summary>
+        public int DropDistrict(ushort id)
+        {
+            int n = 0;
+            foreach (KeyValuePair<uint, Dictionary<ushort, double[]>> kv in _weekRows)
+                if (kv.Value.Remove(id)) n++;
+            Names.Remove(id);
+            WrittenNames.Remove(id); // 让下次 Flush 重写它的 N 行
+            return n;
+        }
+
+        /// <summary>
+        /// 丢弃所有 &gt; week 的记录，返回丢弃的周数。读档时调用：
+        /// 玩家没点保存就退出的话，那些周的记录仍留在（追加式的）文件里，但重新读档后
+        /// 游戏周已回到存档点之前 —— 这些"未来周"属于另一条时间线，不该参与任何统计。
+        /// 注意：不写回文件（文件仍保留它们），靠每次读档重新丢弃来保证不生效。
+        /// </summary>
+        public int DropWeeksAfter(uint week)
+        {
+            int n = 0;
+            for (int i = Weeks.Count - 1; i >= 0; i--)   // Weeks 升序，从尾部丢
+            {
+                uint w = Weeks[i];
+                if (w <= week) break;
+                _weekRows.Remove(w);
+                WeekDateTicks.Remove(w);
+                while (PendingWeeks.Remove(w)) { }       // 别把丢弃的周再写一遍
+                Weeks.RemoveAt(i);
+                n++;
+            }
+            return n;
+        }
+
         /// <summary>把一条 FinanceResult 抽成定序数值行。</summary>
         public static double[] ToRow(DistrictFinanceCalculator.FinanceResult r)
         {
@@ -66,6 +106,7 @@ namespace DistrictFinanceManager
             v[36] = r.AggResLowGDP; v[37] = r.AggResHighGDP; v[38] = r.AggComLowGDP; v[39] = r.AggComHighGDP;
             v[40] = r.AggIndGDP; v[41] = r.AggOffGDP; v[42] = r.AggPlayerGDP;
             v[43] = r.BuiltArea;
+            v[44] = r.DisposableIncome;   // 人均可支配周收入（克朗/周，原版口径）
             return v;
         }
 

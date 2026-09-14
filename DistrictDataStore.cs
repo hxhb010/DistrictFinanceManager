@@ -166,6 +166,69 @@ namespace DistrictFinanceManager
             return Path.Combine(GetDir(), safe + ".grp");
         }
 
+        /// <summary>墓碑文件：记录「曾经存在、后来被删掉」的原版区划 ID。</summary>
+        private static string GetDeadPath(string saveName)
+        {
+            string safe = saveName;
+            foreach (char c in Path.GetInvalidFileNameChars()) safe = safe.Replace(c, '_');
+            return Path.Combine(GetDir(), safe + ".dead");
+        }
+
+        /// <summary>
+        /// 读墓碑。用途：原版区划被删后 ID 会被回收，玩家新画的区划可能拿到同一个 ID。
+        /// 若某个墓碑 ID 又变成已创建，说明 ID 被复用了 —— 新主人不该继承旧主人的层级/组合/周库历史。
+        /// </summary>
+        public static System.Collections.Generic.HashSet<ushort> LoadDeadIds(string saveName)
+        {
+            var set = new System.Collections.Generic.HashSet<ushort>();
+            try
+            {
+                string path = GetDeadPath(saveName);
+                if (!File.Exists(path)) return set;
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t.StartsWith("#")) continue;
+                    ushort id;
+                    if (ushort.TryParse(t, out id) && id != 0) set.Add(id);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[DFM] LoadDeadIds failed: " + ex.Message);
+            }
+            return set;
+        }
+
+        /// <summary>写墓碑（全量覆盖）。集合为空时删除文件。</summary>
+        public static void SaveDeadIds(System.Collections.Generic.HashSet<ushort> ids, string saveName)
+        {
+            try
+            {
+                string path = GetDeadPath(saveName);
+                if (ids == null || ids.Count == 0)
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                    return;
+                }
+                string dir = GetDir();
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                var list = new System.Collections.Generic.List<ushort>(ids);
+                list.Sort();
+                using (StreamWriter w = new StreamWriter(path, false, System.Text.Encoding.UTF8))
+                {
+                    w.WriteLine("# DFM dead districts (deleted vanilla district IDs)");
+                    for (int i = 0; i < list.Count; i++)
+                        w.WriteLine(list[i].ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[DFM] SaveDeadIds failed: " + ex.Message);
+            }
+        }
+
         public static DistrictHierarchy Load(string saveName)
         {
             DistrictHierarchy h = new DistrictHierarchy();

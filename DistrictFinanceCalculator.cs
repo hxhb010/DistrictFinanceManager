@@ -33,6 +33,8 @@ namespace DistrictFinanceManager
             public int BuildingCount;
             public double Area;           // 本区划面积（m²，区划网格 alpha×368.64 加权）
             public double BuiltArea;      // 建成区面积（m² = Σ本区划内建筑占地格数 × 64）
+            public double DisposableIncome; // 人均可支配周收入（克朗/周，原版口径，未乘显示系数）
+            public double IncomeNum;      // 可支配收入分子（Σ工资 + Σ财产，克朗/周）——聚合要按分子求和
             // 各类型区域人口（调试用）
             public int ResPop;            // 住宅居住
             public int ComWorkers;        // 商业工人
@@ -56,6 +58,8 @@ namespace DistrictFinanceManager
             public int AggBuildings;
             public double AggArea;        // 聚合面积（含下辖所有子区划，m²）
             public double AggBuiltArea;   // 聚合建成区面积（m²）
+            public double AggDisposableIncome; // 聚合人均可支配周收入（分子求和 ÷ 人口求和，克朗/周）
+            public double AggIncomeNum;   // 聚合可支配收入分子（子区划分子求和）
             // 聚合各类型人口（调试用）
             public int AggResPop;
             public int AggComWorkers;
@@ -108,8 +112,10 @@ namespace DistrictFinanceManager
             _avgLandValueTime = 0f;
             _allDensity = null;
             _allDensityTime = 0f;
-            // 注意：不要清 _allBuiltCells —— 它是建筑占地统计（与设置/权重无关），
-            // 且跨周采样前会先 ClearCache，若清掉会导致采样读到的建成面积为 0。
+            _districtIncomeNum = null;
+            _districtIncomeNumTime = 0f;
+            // 注意：不要清 _allBuiltCells / _allIncome —— 它们是建筑派生统计（与设置/权重无关），
+            // 且跨周采样前会先 ClearCache，若清掉会导致采样读到的建成面积/收入为 0。
         }
 
         private static ushort _logDistrict;
@@ -139,6 +145,8 @@ namespace DistrictFinanceManager
             if (r.IsValid)
             {
                 AggregateChildren(districtId, ref r, new HashSet<ushort>());
+                // 聚合人均 = 聚合分子 ÷ 聚合人口（不能对子节点人均值求平均，会被小人口节点带偏）
+                r.AggDisposableIncome = r.AggPopulation > 0 ? r.AggIncomeNum / r.AggPopulation : 0.0;
                 // 调试文本在 CalcSelf 已设：当前区划各类型人数 + 平均地价
                 // ComputeTax(ref r); // 收入/净收入暂时注释掉
                 if (districtId != _logDistrict || r.Diag != _logDiag)
@@ -342,6 +350,59 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
+        /// 每区划的可支配收入**分子**（Σ在岗工资 + Σ居民财产收入，克朗/周，原版口径）。
+        /// 由密度分片遍历顺带统计（结果缓存）。人均要再除以该区划常住人口。
+        /// </summary>
+        public double[] GetDistrictIncomeNumerator()
+        {
+            if (_districtIncomeNum != null && Time.time - _districtIncomeNumTime < CacheLife())
+                return _districtIncomeNum;
+            double[] r = new double[256];
+            Dictionary<ushort, IncomeData> inc = _allIncome;
+            if (inc != null)
+            {
+                foreach (KeyValuePair<ushort, IncomeData> kv in inc)
+                    if (kv.Key < 256) r[kv.Key] = kv.Value.WageNum + kv.Value.PropNum;
+            }
+            _districtIncomeNum = r;
+            _districtIncomeNumTime = Time.time;
+            return r;
+        }
+
+        /// <summary>每区划人均可支配周收入（克朗/周）= 分子 ÷ 常住人口；人口为 0 返回 0。</summary>
+        public double[] GetDistrictDisposableIncome()
+        {
+            double[] num = GetDistrictIncomeNumerator();
+            long[] pop = GetDistrictPopulation();
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++)
+                r[i] = pop[i] > 0 ? num[i] / pop[i] : 0.0;
+            return r;
+        }
+
+        /// <summary>
+        /// 聚合人均可支配周收入 = 聚合分子 ÷ 聚合人口。**不能对子节点人均值求平均**
+        /// （会被小人口节点带偏）。结构与 GetAggregatePopulation 保持一致（未入层级的区划为 0）。
+        /// </summary>
+        public double[] GetAggregateDisposableIncome()
+        {
+            double[] self = GetDistrictIncomeNumerator();
+            long[] aggPop = GetAggregatePopulation();
+            double[] r = new double[256];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            double[] aggNum = new double[256];
+            if (hub != null && hub.Hierarchy != null)
+            {
+                var visited = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, self, aggNum, hub.Hierarchy, visited);
+            }
+            for (int i = 0; i < 256; i++)
+                r[i] = aggPop[i] > 0 ? aggNum[i] / aggPop[i] : 0.0;
+            return r;
+        }
+
+        /// <summary>
         /// 建筑价值增量（每区划）：**当前值用实时数据**（实时建成区面积 × 当前地价 × LandMult），
         /// 基准值取周库里的"目标周"（= 最新历史周 − N）。N = 年化(1/2/3)? 52 : 1 周。
         /// 年化时若库里**有一年前的数据**就用一年前那周；**不足一个周期才用最早的有效周（初值）**。
@@ -361,6 +422,7 @@ namespace DistrictFinanceManager
                     double mult = LandMultForCalc();
                     int n = PeriodWeeksForCalc();
                     int bi = SeriesFieldIndex("BuiltArea");
+                    int li = SeriesFieldIndex("LandValue");
                     double[] liveBuilt = GetDistrictBuiltArea(); // 实时建成区面积（m²）
                     long[] liveLand = GetDistrictLandValue();    // 实时地价
                     for (ushort id = 1; id < 256; id++)
@@ -368,16 +430,23 @@ namespace DistrictFinanceManager
                         List<uint> ws = series.SeriesWeeks(id);
                         if (ws.Count == 0) continue;
 
-                        uint curW = ws[ws.Count - 1]; // 最新已记录的周
-                        // 当前值是实时的（处在"最新已记录周"的下一周），故目标周 = (最新已记录周 + 1) − N：
-                        //   周化(N=1) → 上一周（最新已记录那周）；年化(N=52) → 约一年前那周。
+                        // ⚠️ 锚点用【当前游戏周】，**不能**用 ws[ws.Count-1]（周库里最新的周）：
+                        //   回档/读旧档后，周库里会残留"未来时间线"的周（那些周还没被重播覆盖），
+                        //   用 ws.Last() 会把基准取到未来周上 —— 等于拿另一条时间线的数据当基准，
+                        //   算出的增量会离谱（实测：赵县建成区"减少" 178240→149632 就是重播覆盖的痕迹）。
+                        //   锚在当前游戏周后，所有 >target 的周（含未来周）都被自动排除。
+                        uint curW = GameWeek.CurrentWeek;
+                        // 当前值是实时的（处在当前周的下一周），故目标周 = 当前周 + 1 − N：
+                        //   周化(N=1) → 当前周（最近已记录那周）；年化(N=52) → 约一年前那周。
                         long target = (long)curW + 1 - n;
 
                         // 基准：取 ≤目标周 的最近"有效"周（建成区>0）。年化且有一年前数据时，这就是一年前那周。
                         uint pastW = 0; bool havePast = false;
                         for (int i = 0; i < ws.Count; i++)
                         {
-                            if (series.GetValue(id, ws[i], bi) <= 0.0) continue; // 跳过垃圾周
+                            // 只排除「初始还没读到任何数据」的垃圾周（建成区 = 0）。
+                            // 地价 = 0 是合法状态，对应的周照样可以当基准。
+                            if (series.GetValue(id, ws[i], bi) <= 0.0) continue;
                             if ((long)ws[i] <= target) { pastW = ws[i]; havePast = true; }
                             else break;
                         }
@@ -388,7 +457,7 @@ namespace DistrictFinanceManager
                         }
                         if (!havePast) continue;
 
-                        // 当前 = 实时；基准 = 周库目标周
+                        // 当前 = 实时；基准 = 周库目标周（各自用当时的建成区 × 当时的地价）
                         double cur = liveBuilt[id] * (double)liveLand[id] * mult;
                         double past = SeriesBuiltValue(series, id, pastW, mult);
                         r[id] = cur - past;
@@ -414,14 +483,23 @@ namespace DistrictFinanceManager
             return agg;
         }
 
+        /// <summary>某一周的「建成区面积 × 地价」（未乘货币/周期系数）。用于给某一周估值。</summary>
+        private static double WeekBuiltValue(DistrictSeriesDB series, ushort id, uint week, int bi, int li)
+        {
+            double built = bi >= 0 ? series.GetValue(id, week, bi) : 0.0;
+            double land = li >= 0 ? series.GetValue(id, week, li) : 0.0;
+            return built * land;
+        }
+
         private static double SeriesBuiltValue(DistrictSeriesDB series, ushort id, uint week, double mult)
         {
             int bi = SeriesFieldIndex("BuiltArea");
             int li = SeriesFieldIndex("LandValue");
-            double built = bi >= 0 ? series.GetValue(id, week, bi) : 0.0;
-            double land = li >= 0 ? series.GetValue(id, week, li) : 0.0;
-            return built * land * mult;
+            return WeekBuiltValue(series, id, week, bi, li) * mult;
         }
+
+        // 注：SeriesBuiltValue（按当周地价估价）已不再用于增量计算 —— 见 GetDistrictBuiltValueDelta
+        // 里「两端同价估价」的说明。保留仅供后续需要「某周的历史估值」时使用。
 
         private static int SeriesFieldIndex(string name)
         {
@@ -568,6 +646,10 @@ namespace DistrictFinanceManager
                 r.Area = GetDistrictArea()[districtId]; // 面积（m²，区划网格 alpha 加权）
                 r.BuiltArea = GetDistrictBuiltArea()[districtId]; // 建成区面积（m²，建筑占地格数×64）
 
+                // 人均可支配周收入（克朗/周）：分子来自密度分片遍历的收入统计
+                r.IncomeNum = GetDistrictIncomeNumerator()[districtId];
+                r.DisposableIncome = r.Population > 0 ? r.IncomeNum / r.Population : 0.0;
+
                 r.GDP = CalcGDP(d, r.LandValue, r.Population,
                     r.ComWorkers, r.IndWorkers, r.OffWorkers, r.PlayerWorkers);
                 // r.Expense = CountExpenses(dm, districtId); // 支出暂时注释掉
@@ -583,6 +665,7 @@ namespace DistrictFinanceManager
                 r.AggBuildings = r.BuildingCount;
                 r.AggArea = r.Area;
                 r.AggBuiltArea = r.BuiltArea;
+                r.AggIncomeNum = r.IncomeNum;   // 聚合分子（人均值在 Calculate 末尾按聚合人口除）
                 r.AggResPop = r.ResPop;
                 r.AggComWorkers = r.ComWorkers;
                 r.AggIndWorkers = r.IndWorkers;
@@ -628,6 +711,7 @@ namespace DistrictFinanceManager
                 r.AggBuildings += c.BuildingCount;
                 r.AggArea += c.Area;
                 r.AggBuiltArea += c.BuiltArea;
+                r.AggIncomeNum += c.IncomeNum;   // 分子求和（人均值在 Calculate 末尾除聚合人口）
                 r.AggResPop += c.ResPop;
                 r.AggComWorkers += c.ComWorkers;
                 r.AggIndWorkers += c.IndWorkers;
@@ -823,6 +907,15 @@ namespace DistrictFinanceManager
         private Dictionary<ushort, long> _allBuiltCells;
         private Dictionary<ushort, long> _builtCellsPartial;
 
+        // 人均可支配收入：每区划的分子累加（同样在密度分片遍历里顺带统计）
+        private Dictionary<ushort, IncomeData> _allIncome;
+        private Dictionary<ushort, IncomeData> _incomePartial;
+        private double[] _districtIncomeNum;      // 分子缓存（WageNum + PropNum）
+        private float _districtIncomeNumTime;
+
+        /// <summary>基准周工资（克朗/周），下标 = Citizen.Education（0 未受教育 / 1 小学 / 2 中学 / 3 大学）。</summary>
+        private static readonly double[] BASE_WAGE = { 15.0, 20.0, 27.0, 38.0 };
+
         private static double _avgLandValue;
         private static float _avgLandValueTime;
 
@@ -901,6 +994,19 @@ namespace DistrictFinanceManager
             public int ResLow, ResHigh, ComLow, ComHigh;
         }
 
+        /// <summary>
+        /// 每区划的收入累加器（克朗/周，原版口径，不预乘显示系数）。
+        /// WageNum/PropNum 是「分子」，人均 = 分子 ÷ 该区划常住人口（在取值函数里做除法）。
+        /// 聚合时也是「分子求和 ÷ 人口求和」，不能对人均值求平均。
+        /// </summary>
+        private struct IncomeData
+        {
+            public double WageNum;   // Σ 在岗市民的税后工资（按其居住地归集，地价取居住地）
+            public double PropNum;   // Σ 居民的税后财产收入
+            public int Workers;      // 在岗市民数
+            public int ResTaxPct;    // 住宅税率读数（诊断用，取最后一栋住宅建筑的值）
+        }
+
         /// <summary>返回分片遍历构建的密度数据（由 Hub 每帧调用 TickDensityBuild 逐步填充）。</summary>
         private Dictionary<ushort, DensityData> GetAllDensity()
         {
@@ -928,6 +1034,7 @@ namespace DistrictFinanceManager
                     _densityPerTick = System.Math.Max(1u, _densityTotal / (uint)period);
                     _densityPartial = new Dictionary<ushort, DensityData>();
                     _builtCellsPartial = new Dictionary<ushort, long>();
+                    _incomePartial = new Dictionary<ushort, IncomeData>();
                     _densityBuilding = true;
                 }
 
@@ -939,6 +1046,7 @@ namespace DistrictFinanceManager
                 {
                     _allDensity = _densityPartial;
                     _allBuiltCells = _builtCellsPartial;
+                    _allIncome = _incomePartial;
                     _allDensityTime = Time.time;
                     _densityBuilding = false;
                 }
@@ -961,6 +1069,8 @@ namespace DistrictFinanceManager
             CitizenUnit[] units = cm.m_units.m_buffer;
             Citizen[] citizens = cm.m_citizens.m_buffer;
             uint citizenSize = (uint)citizens.Length;
+            District[] dbuf = dm.m_districts.m_buffer;
+            EconomyManager em = Singleton<EconomyManager>.instance;
 
             for (uint i = start; i < end; i++)
             {
@@ -969,7 +1079,13 @@ namespace DistrictFinanceManager
                 BuildingInfo info = b.Info;
                 if (info == null) continue;
                 byte d = dm.GetDistrict(b.m_position);
-                if (d == 0) continue;
+
+                // 工资项必须在「d==0 提前返回」**之前**处理：口径是「全城所有在岗市民」，
+                // 区划外（未分配区域）的工作建筑里也有在岗市民，他们的工资照样要按居住地归集。
+                if (IsIncomeWorkplace(info.m_class.m_service))
+                    AccumWages(b, (ushort)i, d, dm, units, citizens, citizenSize, buf, dbuf, em);
+
+                if (d == 0 || d >= dbuf.Length) continue;
 
                 // 建成区：本建筑占地格数（m_width×m_length，每格 64 m²）—— 不限用途，凡建成即计
                 long bc;
@@ -984,6 +1100,14 @@ namespace DistrictFinanceManager
                     int n = CountInBuilding(b, units, citizens, citizenSize, (ushort)i, true);
                     bool low = info.m_class.m_subService == ItemClass.SubService.ResidentialLow;
                     if (low) dd.ResLow += n; else dd.ResHigh += n;
+
+                    // 财产收入：每个居民各计一次；地价取本区划地价，再扣住宅密度税
+                    IncomeData inc;
+                    if (!_incomePartial.TryGetValue(d, out inc)) inc = new IncomeData();
+                    int resTax = TaxRateOf(em, info, dbuf[d].m_taxationPoliciesEffect);
+                    inc.PropNum += n * dbuf[d].m_groundData.m_finalLandvalue * 0.2 * (1.0 - resTax / 100.0);
+                    inc.ResTaxPct = resTax;
+                    _incomePartial[d] = inc;
                 }
                 else if (info.m_class.m_service == ItemClass.Service.Commercial)
                 {
@@ -992,6 +1116,102 @@ namespace DistrictFinanceManager
                     if (low) dd.ComLow += n; else dd.ComHigh += n;
                 }
                 _densityPartial[d] = dd;
+            }
+        }
+
+        /// <summary>
+        /// 计入收入统计的工作场所：商/工/办/玩家产业。
+        /// （注意与既有的 IsWorkplace(ItemClass) 区分：那个只含商/工/办，用于「工作人数」统计，
+        ///   改动它会变动既有数值，故此处另起一名。）
+        /// </summary>
+        private static bool IsIncomeWorkplace(ItemClass.Service svc)
+        {
+            return svc == ItemClass.Service.Commercial
+                || svc == ItemClass.Service.Industrial
+                || svc == ItemClass.Service.Office
+                || svc == ItemClass.Service.PlayerIndustry;
+        }
+
+        /// <summary>
+        /// 遍历一栋工作建筑里的在岗市民（m_workBuilding == 本建筑），逐个把税后工资累加到其
+        /// **居住地所在区划**的收入累加器。地价用居住地地价，税率用本工作建筑的游戏税率。
+        /// </summary>
+        private void AccumWages(Building b, ushort buildingId, byte workDistrict, DistrictManager dm,
+            CitizenUnit[] units, Citizen[] citizens, uint citizenSize,
+            Building[] bbuf, District[] dbuf, EconomyManager em)
+        {
+            if (b.m_citizenUnits == 0) return;
+            // 工作建筑可能不在任何区划内（未分配区域）→ 没有区划税收政策，按无政策取税率
+            DistrictPolicies.Taxation taxation = DistrictPolicies.Taxation.None;
+            if (workDistrict != 0 && workDistrict < dbuf.Length)
+                taxation = dbuf[workDistrict].m_taxationPoliciesEffect;
+            int taxPct = TaxRateOf(em, b.Info, taxation);
+            double afterTax = 1.0 - taxPct / 100.0;
+
+            uint unit = b.m_citizenUnits;
+            int guard = 0;
+            while (unit != 0 && guard++ < 4096)
+            {
+                CitizenUnit u = units[unit];
+                for (int j = 0; j < 5; j++)
+                {
+                    uint cid = u.GetCitizen(j);
+                    if (cid == 0 || cid >= citizenSize) continue;
+                    Citizen c = citizens[cid];
+                    if (c.m_workBuilding != buildingId) continue;   // 只算真正在此上班的（排除来访/顾客）
+
+                    // 归集到居住地所在区划
+                    ushort home = c.m_homeBuilding;
+                    if (home == 0 || home >= bbuf.Length) continue;  // 无家可归 / 越界：不计
+                    if ((bbuf[home].m_flags & Building.Flags.Created) == 0) continue;
+                    // 居住地不在任何区划内 → 无从归集，直接不计。
+                    // （口径要一致：这类居民也不计入任何区划的分母 m_populationData，
+                    //   若改归到工作区划，会把非本区居民的收入摊到本区常住人口头上。）
+                    byte hd = dm.GetDistrict(bbuf[home].m_position);
+                    if (hd == 0 || hd >= dbuf.Length) continue;
+
+                    int edu = (int)c.EducationLevel;
+                    if (edu < 0 || edu >= BASE_WAGE.Length) edu = 0;
+                    double lv = dbuf[hd].m_groundData.m_finalLandvalue;   // ★ 用【居住地】地价
+                    double wage = BASE_WAGE[edu] * (0.5 + lv / 35.0) * afterTax;
+
+                    IncomeData inc;
+                    if (!_incomePartial.TryGetValue(hd, out inc)) inc = new IncomeData();
+                    inc.WageNum += wage;
+                    inc.Workers++;
+                    _incomePartial[hd] = inc;
+                }
+                unit = u.m_nextUnit;
+            }
+        }
+
+        /// <summary>生态子服务映射回对应的普通子服务（游戏税率表里没有 eco 项）。</summary>
+        private static ItemClass.SubService BaseSubService(ItemClass.SubService ss)
+        {
+            if (ss == ItemClass.SubService.ResidentialLowEco) return ItemClass.SubService.ResidentialLow;
+            if (ss == ItemClass.SubService.ResidentialHighEco) return ItemClass.SubService.ResidentialHigh;
+            if (ss == ItemClass.SubService.CommercialEco) return ItemClass.SubService.CommercialLow;
+            return ss;
+        }
+
+        /// <summary>
+        /// 取某建筑的游戏税率（百分比，1~29，默认 9）。区划税收政策（±2%）通过 taxation 标志
+        /// 交给游戏自己算，不在这里硬编码。
+        /// </summary>
+        private static int TaxRateOf(EconomyManager em, BuildingInfo info, DistrictPolicies.Taxation taxation)
+        {
+            if (em == null || info == null) return 9;
+            try
+            {
+                int t = em.GetTaxRate(info.m_class.m_service,
+                    BaseSubService(info.m_class.m_subService), info.m_class.m_level, taxation);
+                if (t < 0) return 0;
+                if (t > 100) return 100;
+                return t;
+            }
+            catch (System.Exception)
+            {
+                return 9;
             }
         }
 

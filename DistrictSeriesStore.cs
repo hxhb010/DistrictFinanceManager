@@ -20,7 +20,7 @@ namespace DistrictFinanceManager
     /// </summary>
     public static class DistrictSeriesStore
     {
-        public const string SeriesVersion = "v2"; // v2: 追加 BuiltArea 字段（43→44 列）
+        public const string SeriesVersion = "v3"; // v3: 追加 DisposableIncome 字段（44→45 列）；v2=BuiltArea（43→44）
 
         private static string GetDir()
         {
@@ -45,6 +45,69 @@ namespace DistrictFinanceManager
         {
             if (s == null) return "";
             return s.Replace('\r', ' ').Replace('\n', ' ');
+        }
+
+        /// <summary>
+        /// **整表重写**（不是追加）。用于 ID 复用后清除某区划的陈旧历史：
+        /// Flush 是追加式的，旧行物理上还在文件里，只清内存的话下次读档又会读回来。
+        /// 数据量是百 KB 级，一次性重写代价可以忽略。
+        /// </summary>
+        public static void Rewrite(DistrictSeriesDB db, string saveName)
+        {
+            try
+            {
+                if (db == null) return;
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("# DFM Series ").Append(SeriesVersion)
+                  .Append(" fields=").Append(DistrictSeriesDB.FIELDS.Length).Append('\n');
+                sb.Append("# F");
+                for (int i = 0; i < DistrictSeriesDB.FIELDS.Length; i++)
+                    sb.Append(' ').Append(DistrictSeriesDB.FIELDS[i]);
+                sb.Append('\n');
+
+                foreach (KeyValuePair<ushort, string> kv in db.Names)
+                {
+                    string nm = OneLine(kv.Value);
+                    if (nm.Length == 0) continue;
+                    sb.Append("N ").Append(kv.Key).Append(' ').Append(nm).Append('\n');
+                }
+
+                List<uint> weeks = new List<uint>(db.Weeks);
+                weeks.Sort();
+                for (int p = 0; p < weeks.Count; p++)
+                {
+                    uint wk = weeks[p];
+                    long ticks;
+                    if (!db.WeekDateTicks.TryGetValue(wk, out ticks)) ticks = 0L;
+                    sb.Append("W ").Append(wk.ToString(CultureInfo.InvariantCulture))
+                      .Append(' ').Append(ticks.ToString(CultureInfo.InvariantCulture)).Append('\n');
+
+                    Dictionary<ushort, double[]> rows = db.RowsOf(wk);
+                    if (rows == null) continue;
+                    foreach (KeyValuePair<ushort, double[]> kv in rows)
+                    {
+                        double[] row = kv.Value;
+                        if (row == null) continue;
+                        sb.Append("D ").Append(kv.Key.ToString(CultureInfo.InvariantCulture));
+                        for (int i = 0; i < row.Length; i++) { sb.Append(' '); sb.Append(FormatNum(row[i])); }
+                        sb.Append('\n');
+                    }
+                }
+
+                string dir = GetDir();
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(GetSeriesPath(saveName), sb.ToString(), new UTF8Encoding(false));
+
+                db.ClearPending();
+                foreach (KeyValuePair<ushort, string> kv in db.Names)
+                {
+                    string nm = OneLine(kv.Value);
+                    if (nm.Length > 0) db.WrittenNames[kv.Key] = nm;
+                }
+                Debug.Log("[DFM] Series rewritten: " + db.WeekCount + " weeks -> " + GetSeriesPath(saveName));
+            }
+            catch (Exception ex) { Debug.LogError("[DFM] Series rewrite failed: " + ex.Message); }
         }
 
         /// <summary>把该存档的 .series 读进 db（文件不存在则保持为空）。</summary>
