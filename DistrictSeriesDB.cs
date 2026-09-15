@@ -105,7 +105,9 @@ namespace DistrictFinanceManager
             v[32] = r.AggResLow; v[33] = r.AggResHigh; v[34] = r.AggComLow; v[35] = r.AggComHigh;
             v[36] = r.AggResLowGDP; v[37] = r.AggResHighGDP; v[38] = r.AggComLowGDP; v[39] = r.AggComHighGDP;
             v[40] = r.AggIndGDP; v[41] = r.AggOffGDP; v[42] = r.AggPlayerGDP;
-            v[43] = r.BuiltArea;
+            // 存的是「建筑价值增量」的基准面积（原始面积×用途权重），不是面板显示的建成区面积 ——
+            // 增量的实时值与历史基准必须同口径，否则算出来的增量没有意义。
+            v[43] = r.BuiltValueArea;
             v[44] = r.DisposableIncome;   // 人均可支配周收入（克朗/周，原版口径）
             return v;
         }

@@ -32,7 +32,8 @@ namespace DistrictFinanceManager
             public int LandValue;         // 地价（0~255）
             public int BuildingCount;
             public double Area;           // 本区划面积（m²，区划网格 alpha×368.64 加权）
-            public double BuiltArea;      // 建成区面积（m² = Σ本区划内建筑占地格数 × 64）
+            public double BuiltArea;      // 建成区面积（m² = Σ建筑占地格数 × 64 × 空隙系数2，上限=区划面积）
+            public double BuiltValueArea; // 「建筑价值增量」用的加权占地面积（原始面积 × 用途权重，无空隙系数）
             public double DisposableIncome; // 人均可支配周收入（克朗/周，原版口径，未乘显示系数）
             public double IncomeNum;      // 可支配收入分子（Σ工资 + Σ财产，克朗/周）——聚合要按分子求和
             // 各类型区域人口（调试用）
@@ -350,6 +351,22 @@ namespace DistrictFinanceManager
             return r;
         }
 
+        /// <summary>
+        /// 「建筑价值增量」用的加权占地面积（m²）= Σ 建筑占地格数 × 64 × 用途权重。
+        /// **不含空隙系数**（增量用原始面积），也不做上限截断 —— 与「建成区面积」是两个口径。
+        /// </summary>
+        public double[] GetDistrictBuiltWeightArea()
+        {
+            double[] r = new double[256];
+            Dictionary<ushort, double> cells = _allBuiltWeightCells;
+            if (cells != null)
+            {
+                foreach (KeyValuePair<ushort, double> kv in cells)
+                    if (kv.Key < 256) r[kv.Key] = kv.Value * 64.0;
+            }
+            return r;
+        }
+
         /// <summary>聚合建成区面积（m²，含下辖所有子区划，递归；复用 AccumArea 后序累加）。</summary>
         public double[] GetAggregateBuiltArea()
         {
@@ -440,7 +457,8 @@ namespace DistrictFinanceManager
                     int n = PeriodWeeksForCalc();
                     int bi = SeriesFieldIndex("BuiltArea");
                     int li = SeriesFieldIndex("LandValue");
-                    double[] liveBuilt = GetDistrictBuiltArea(); // 实时建成区面积（m²）
+                    // 用【加权原始面积】而不是面板显示的建成区面积：增量按用途加权、不含空隙系数
+                    double[] liveBuilt = GetDistrictBuiltWeightArea();
                     long[] liveLand = GetDistrictLandValue();    // 实时地价
                     for (ushort id = 1; id < 256; id++)
                     {
@@ -661,7 +679,8 @@ namespace DistrictFinanceManager
                     d.m_playerData.m_finalBuildingCount;
 
                 r.Area = GetDistrictArea()[districtId]; // 面积（m²，区划网格 alpha 加权）
-                r.BuiltArea = GetDistrictBuiltArea()[districtId]; // 建成区面积（m²，建筑占地格数×64）
+                r.BuiltArea = GetDistrictBuiltArea()[districtId]; // 建成区面积（m²，建筑占地×64×空隙系数，上限=区划面积）
+                r.BuiltValueArea = GetDistrictBuiltWeightArea()[districtId]; // 增量用的加权面积
 
                 // 人均可支配周收入（克朗/周）：分子来自密度分片遍历的收入统计
                 r.IncomeNum = GetDistrictIncomeNumerator()[districtId];
@@ -924,6 +943,32 @@ namespace DistrictFinanceManager
         private Dictionary<ushort, long> _allBuiltCells;
         private Dictionary<ushort, long> _builtCellsPartial;
 
+        // 「建筑价值增量」用的加权占地：按用途区分权重，且**不含**空隙系数（用的是原始面积）
+        private Dictionary<ushort, double> _allBuiltWeightCells;
+        private Dictionary<ushort, double> _builtWeightPartial;
+
+        /// <summary>
+        /// 「建筑价值增量」的面积权重：不同用途的地均价值差异很大，按类别加权。
+        /// 低密住宅 0.5 / 高密住宅 1 / 低密商业 2 / 高密商业 4 / 办公 4 / 玩家建筑 3 / 工业 1.5；
+        /// 未列出的用途（公园、公共服务等）按 1.0 中性计。
+        /// </summary>
+        private static double BuiltWeight(ItemClass.Service svc, ItemClass.SubService sub)
+        {
+            if (svc == ItemClass.Service.Residential)
+            {
+                // 生态住宅（Green Cities）也是住宅，低密的归 0.5、高密的归 1
+                if (sub == ItemClass.SubService.ResidentialHigh
+                    || sub == ItemClass.SubService.ResidentialHighEco) return 1.0;
+                return 0.5;
+            }
+            if (svc == ItemClass.Service.Commercial)
+                return sub == ItemClass.SubService.CommercialHigh ? 4.0 : 2.0;
+            if (svc == ItemClass.Service.Office) return 4.0;
+            if (svc == ItemClass.Service.PlayerIndustry) return 3.0;
+            if (svc == ItemClass.Service.Industrial) return 1.5;
+            return 1.0;
+        }
+
         // 人均可支配收入：每区划的分子累加（同样在密度分片遍历里顺带统计）
         private Dictionary<ushort, IncomeData> _allIncome;
         private Dictionary<ushort, IncomeData> _incomePartial;
@@ -1051,6 +1096,7 @@ namespace DistrictFinanceManager
                     _densityPerTick = System.Math.Max(1u, _densityTotal / (uint)period);
                     _densityPartial = new Dictionary<ushort, DensityData>();
                     _builtCellsPartial = new Dictionary<ushort, long>();
+                    _builtWeightPartial = new Dictionary<ushort, double>();
                     _incomePartial = new Dictionary<ushort, IncomeData>();
                     _densityBuilding = true;
                 }
@@ -1063,6 +1109,7 @@ namespace DistrictFinanceManager
                 {
                     _allDensity = _densityPartial;
                     _allBuiltCells = _builtCellsPartial;
+                    _allBuiltWeightCells = _builtWeightPartial;
                     _allIncome = _incomePartial;
                     _allDensityTime = Time.time;
                     _densityBuilding = false;
@@ -1108,6 +1155,13 @@ namespace DistrictFinanceManager
                 long bc;
                 _builtCellsPartial.TryGetValue(d, out bc);
                 _builtCellsPartial[d] = bc + (long)b.m_width * (long)b.m_length;
+
+                // 加权占地：给「建筑价值增量」用，按用途区分权重（原始面积，不含空隙系数）
+                double wcells;
+                _builtWeightPartial.TryGetValue(d, out wcells);
+                _builtWeightPartial[d] = wcells
+                    + (double)b.m_width * (double)b.m_length
+                      * BuiltWeight(info.m_class.m_service, info.m_class.m_subService);
 
                 DensityData dd;
                 if (!_densityPartial.TryGetValue(d, out dd)) dd = new DensityData();

@@ -112,9 +112,12 @@ namespace DistrictFinanceManager
         // 负值→红端(0..5)、正值→绿紫端(7..15)。随 货币(LandMult) × 周期(周=1/年=52) 缩放。
         // 档位是**手调**的（不套严格公式）：最低变色档 10k，之后按 ~2.2 倍递增（递增比率参照 GDP_TIERS）；
         // 负值区间比正值放宽得多 —— 缩水/拆除的幅度可以很大，值得多留几档。
-        private static readonly double[] BUILT_DELTA_TIERS =
+        // 手调的基准档位（最低变色档 10k，之后约 ×2.2 递增），整体再乘 DELTA_TIER_SCALE。
+        private static readonly double[] BUILT_DELTA_BASE_TIERS =
             { -1500000, -450000, -150000, -60000, -25000, -10000,
                10000, 25000, 60000, 140000, 320000, 700000, 1500000, 3000000, 6000000 };
+        private const double DELTA_TIER_SCALE = 1.5;
+        private static readonly double[] BUILT_DELTA_TIERS = ScaledTiers(BUILT_DELTA_BASE_TIERS, DELTA_TIER_SCALE);
 
         // 人均可支配收入分档阈值（15 个，对应 16 档颜色）—— = 人均GDP 档位 ÷ 2。
         // 两者都是「人均货币值」，可支配收入是本区划居民的实际到手收入，量级约为人均GDP 的一半。
