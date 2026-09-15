@@ -455,7 +455,9 @@ namespace DistrictFinanceManager
                 {
                     double mult = LandMultForCalc();
                     int n = PeriodWeeksForCalc();
-                    int bi = SeriesFieldIndex("BuiltArea");
+                    // 基准面积用 v4 新增的 BuiltValueArea 列：老档没有这列 → 读出来是 0 →
+                    // 那些周被当作无效基准自动跳过（老数据冷处理，不做迁移）。
+                    int bi = SeriesFieldIndex("BuiltValueArea");
                     int li = SeriesFieldIndex("LandValue");
                     // 用【加权原始面积】而不是面板显示的建成区面积：增量按用途加权、不含空隙系数
                     double[] liveBuilt = GetDistrictBuiltWeightArea();
@@ -949,8 +951,8 @@ namespace DistrictFinanceManager
 
         /// <summary>
         /// 「建筑价值增量」的面积权重：不同用途的地均价值差异很大，按类别加权。
-        /// 低密住宅 0.5 / 高密住宅 1 / 低密商业 2 / 高密商业 4 / 办公 4 / 玩家建筑 3 / 工业 1.5；
-        /// 未列出的用途（公园、公共服务等）按 1.0 中性计。
+        /// 低密住宅 0.5 / 高密住宅 1 / 低密商业 2 / 高密商业 4 / 办公 4 / 玩家建筑 3 / 工业 1.5 /
+        /// 公共服务建筑（含公园）3；未列出的用途按 1.0 中性计。
         /// </summary>
         private static double BuiltWeight(ItemClass.Service svc, ItemClass.SubService sub)
         {
@@ -966,6 +968,18 @@ namespace DistrictFinanceManager
             if (svc == ItemClass.Service.Office) return 4.0;
             if (svc == ItemClass.Service.PlayerIndustry) return 3.0;
             if (svc == ItemClass.Service.Industrial) return 1.5;
+            switch (svc)
+            {
+                // 公共服务建筑（与 IsExpenseBuilding 同口径，含公园）
+                case ItemClass.Service.Garbage:
+                case ItemClass.Service.HealthCare:
+                case ItemClass.Service.PoliceDepartment:
+                case ItemClass.Service.Education:
+                case ItemClass.Service.FireDepartment:
+                case ItemClass.Service.Disaster:
+                case ItemClass.Service.Beautification:
+                    return 3.0;
+            }
             return 1.0;
         }
 

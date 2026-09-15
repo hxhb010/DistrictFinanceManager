@@ -20,7 +20,7 @@ namespace DistrictFinanceManager
     /// </summary>
     public static class DistrictSeriesStore
     {
-        public const string SeriesVersion = "v3"; // v3: 追加 DisposableIncome 字段（44→45 列）；v2=BuiltArea（43→44）
+        public const string SeriesVersion = "v4"; // v4: 追加 BuiltValueArea（45→46 列）；v3=DisposableIncome（44→45）；v2=BuiltArea（43→44）
 
         private static string GetDir()
         {

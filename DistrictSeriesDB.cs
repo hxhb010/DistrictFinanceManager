@@ -27,7 +27,11 @@ namespace DistrictFinanceManager
             // 追加（index 43；改动须升 SeriesVersion）
             "BuiltArea",
             // 追加（index 44）
-            "DisposableIncome"
+            "DisposableIncome",
+            // 追加（index 45）—— 「建筑价值增量」的基准面积（原始面积×用途权重）。
+            // 老档没有这一列 → GetValue 返回 0 → 那些周自动被当作无效基准跳过（冷处理），
+            // 不需要任何迁移；等新的周攒起来，增量自然就有基准了。
+            "BuiltValueArea"
         };
 
         /// <summary>已有的周号（唯一，升序）。</summary>
@@ -105,10 +109,9 @@ namespace DistrictFinanceManager
             v[32] = r.AggResLow; v[33] = r.AggResHigh; v[34] = r.AggComLow; v[35] = r.AggComHigh;
             v[36] = r.AggResLowGDP; v[37] = r.AggResHighGDP; v[38] = r.AggComLowGDP; v[39] = r.AggComHighGDP;
             v[40] = r.AggIndGDP; v[41] = r.AggOffGDP; v[42] = r.AggPlayerGDP;
-            // 存的是「建筑价值增量」的基准面积（原始面积×用途权重），不是面板显示的建成区面积 ——
-            // 增量的实时值与历史基准必须同口径，否则算出来的增量没有意义。
-            v[43] = r.BuiltValueArea;
+            v[43] = r.BuiltArea;          // 建成区面积（面板显示口径：含空隙系数、上限=区划面积）
             v[44] = r.DisposableIncome;   // 人均可支配周收入（克朗/周，原版口径）
+            v[45] = r.BuiltValueArea;     // 增量基准面积（原始面积×用途权重）
             return v;
         }
 
