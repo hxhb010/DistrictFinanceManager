@@ -83,15 +83,16 @@ namespace DistrictFinanceManager
         private static readonly double[] AREA_TIERS =
             { 0.01, 0.05, 0.1, 0.2, 0.4, 0.7, 1.2, 2, 3, 5, 8, 13, 20, 32, 50 };
 
-        // 建成区面积分档阈值（15 个）—— = 区域面积档位 ÷ 2（建成区通常只占区域面积一半左右）。
+        // 建成区面积分档阈值（15 个）—— = 区域面积档位 × 0.75（原为「÷2」，本版 ×1.5）。
+        // 建成区已含建筑空隙（×2，见计算器 BUILT_AREA_GAP_FACTOR），阈值随之抬高。
         // **只换阈值，颜色阶梯仍是同一套 TIER_COLORS**。（必须在 AREA_TIERS 之后声明）
-        private static readonly double[] BUILT_AREA_TIERS = HalfTiers(AREA_TIERS);
+        private static readonly double[] BUILT_AREA_TIERS = ScaledTiers(AREA_TIERS, 0.75);
 
-        /// <summary>把一张分档表逐项减半（不能用 Linq，写显式循环）。</summary>
-        private static double[] HalfTiers(double[] src)
+        /// <summary>把一张分档表整体缩放（不能用 Linq，写显式循环）。</summary>
+        private static double[] ScaledTiers(double[] src, double f)
         {
             double[] r = new double[src.Length];
-            for (int i = 0; i < src.Length; i++) r[i] = src[i] * 0.5;
+            for (int i = 0; i < src.Length; i++) r[i] = src[i] * f;
             return r;
         }
 

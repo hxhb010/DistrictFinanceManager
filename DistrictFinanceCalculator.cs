@@ -316,17 +316,34 @@ namespace DistrictFinanceManager
         /// <summary>建成区数据是否已就绪（首次建筑遍历完成后为 true）。采样前用它把关。</summary>
         public bool BuiltAreaReady { get { return _allBuiltCells != null; } }
 
-        /// <summary>每区划建成区面积（m²）= Σ本区划内建筑占地格数 × 64。由密度分片遍历顺带统计（结果缓存）。</summary>
+        /// <summary>
+        /// 建筑之间的空隙系数：只按建筑占地（m_width×m_length）统计会漏掉建筑之间的道路、
+        /// 人行道、院落等实际已建成的部分，故 ×2 作为近似。
+        /// </summary>
+        private const double BUILT_AREA_GAP_FACTOR = 2.0;
+
+        /// <summary>
+        /// 每区划建成区面积（m²）= Σ本区划内建筑占地格数 × 64 × 空隙系数(2.0)。
+        /// **上限截断为该区划的总面积**（空隙系数是估计值，不能算出比区划本身还大的数）。
+        /// 由密度分片遍历顺带统计（结果缓存）。
+        /// </summary>
         public double[] GetDistrictBuiltArea()
         {
             if (_districtBuiltArea != null && Time.time - _districtBuiltAreaTime < CacheLife())
                 return _districtBuiltArea;
             double[] r = new double[256];
+            double[] area = GetDistrictArea();
             Dictionary<ushort, long> cells = _allBuiltCells;
             if (cells != null)
             {
                 foreach (KeyValuePair<ushort, long> kv in cells)
-                    if (kv.Key < 256) r[kv.Key] = kv.Value * 64.0;
+                {
+                    if (kv.Key >= 256) continue;
+                    double v = kv.Value * 64.0 * BUILT_AREA_GAP_FACTOR;
+                    double a = area[kv.Key];
+                    if (a > 0.0 && v > a) v = a;   // 合理性上限：不得超过区划总面积
+                    r[kv.Key] = v;
+                }
             }
             _districtBuiltArea = r;
             _districtBuiltAreaTime = Time.time;
