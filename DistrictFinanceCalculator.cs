@@ -496,7 +496,7 @@ namespace DistrictFinanceManager
 
                         // 当前 = 实时；基准 = 周库目标周（各自用当时的建成区 × 当时的地价）
                         double cur = liveBuilt[id] * (double)liveLand[id] * mult;
-                        double past = SeriesBuiltValue(series, id, pastW, mult);
+                        double past = SeriesBuiltValue(series, id, pastW, bi, li, mult);
                         r[id] = cur - past;
                     }
                 }
@@ -528,10 +528,13 @@ namespace DistrictFinanceManager
             return built * land;
         }
 
-        private static double SeriesBuiltValue(DistrictSeriesDB series, ushort id, uint week, double mult)
+        /// <summary>
+        /// 某一周的「基准面积 × 地价 × 系数」。**列号必须由调用方传入** ——
+        /// 之前这里自己按名字查 "BuiltArea"，与基准周选取用的列（BuiltValueArea）不是同一列，
+        /// 导致「选的是新列的周、取的是老列的值」，基准全错。
+        /// </summary>
+        private static double SeriesBuiltValue(DistrictSeriesDB series, ushort id, uint week, int bi, int li, double mult)
         {
-            int bi = SeriesFieldIndex("BuiltArea");
-            int li = SeriesFieldIndex("LandValue");
             return WeekBuiltValue(series, id, week, bi, li) * mult;
         }
 
