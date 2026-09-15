@@ -1105,6 +1105,10 @@ namespace DistrictFinanceManager
 
                 if (!_densityBuilding)
                 {
+                    // 建筑缓冲还没就绪（读档瞬间可能读到 0）→ 什么都别做，等下一次调用。
+                    // 否则首轮会"完成"成一个空快照并发布出去，BuiltAreaReady 提前变 true，
+                    // 采样就会把「建成区=0」的垃圾周写进周库。
+                    if (bm.m_buildings.m_size < 2) return;
                     _densityTotal = bm.m_buildings.m_size;
                     _densityProgress = 1;
                     _densityPerTick = System.Math.Max(1u, _densityTotal / (uint)period);
@@ -1115,7 +1119,16 @@ namespace DistrictFinanceManager
                     _densityBuilding = true;
                 }
 
-                uint end = System.Math.Min(_densityProgress + _densityPerTick, _densityTotal);
+                // 首次遍历（读档后还没发布过任何数据）一次跑完整城 —— 面板立刻就有建成区/增量/收入，
+                // 不用等 UpdateInterval×3 秒。之后每轮重扫仍按分片，避免每秒卡顿。
+                // 判据用 _allBuiltCells：它只在首轮结束时发布，且不会被 ClearCache 清掉，
+                // 所以「切显示模式」这类会清缓存的操作不会触发全量重扫。
+                uint end;
+                if (_allBuiltCells == null)
+                    end = _densityTotal;   // 首轮：全量
+                else
+                    end = System.Math.Min(_densityProgress + _densityPerTick, _densityTotal);
+
                 ProcessDensityRange(_densityProgress, end);
                 _densityProgress = end;
 
