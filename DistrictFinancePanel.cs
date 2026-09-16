@@ -441,7 +441,7 @@ namespace DistrictFinanceManager
                 _panelPos.y + (PAD + 1) * _scale, 80 * _scale, (TITLE_H - 2) * _scale);
             // 语言按钮区域：同上，否则点它会变成拖动面板
             Rect langBtnScreen = new Rect(_panelPos.x + (PW / 2f + 44) * _scale,
-                _panelPos.y + (PAD + 1) * _scale, 108 * _scale, (TITLE_H - 2) * _scale);
+                _panelPos.y + (PAD + 1) * _scale, 150 * _scale, (TITLE_H - 2) * _scale);
 
             if (e.type == EventType.MouseDown && e.button == 0
                 && titleScreen.Contains(e.mousePosition)
@@ -494,7 +494,7 @@ namespace DistrictFinanceManager
             zoomRight.alignment = TextAnchor.MiddleRight;
             // 文案缩短，给「说明」右侧的语言按钮让位（原来那句会顶到语言按钮上）
             GUI.Label(new Rect(PW - 290, y, 280, TEXT_H),
-                Loc.T("滚轮缩放 ", "Zoom ") + string.Format("{0:P0}", _scale), zoomRight);
+                Loc.T("缩放 ", "Zoom ") + string.Format("{0:P0}", _scale), zoomRight);
 
             // 顶部正中：操作说明按钮
             if (GUI.Button(new Rect(PW / 2f - 40, y + 1, 80, TITLE_H - 2), Loc.T("说明", "Help"), _helpVis ? _bn2 : _btn))
@@ -502,7 +502,7 @@ namespace DistrictFinanceManager
 
             // 顶部：语言切换（在「说明」右边）。点一下即切换并写入设置，选项窗口里也会同步显示。
             // 标签**始终用英文**：这个按钮主要是给英文使用者找的，中文模式下也必须能认出 "Language"。
-            if (GUI.Button(new Rect(PW / 2f + 44, y + 1, 108, TITLE_H - 2),
+            if (GUI.Button(new Rect(PW / 2f + 44, y + 1, 150, TITLE_H - 2),
                 Loc.IsEn ? "Language: English" : "Language: Chinese", _btn))
             {
                 string next = Loc.IsEn ? "zh" : "en";
@@ -823,8 +823,11 @@ namespace DistrictFinanceManager
 
             Rect btn = new Rect(PW - 146, PAD + TITLE_H + 20, 136, BTN_H);
 
-            // 下拉框上方：统计模式选择（右移一点）
-            GUI.Label(new Rect(btn.x + 12, btn.y - 18, 140, TEXT_H), Loc.T("统计模式选择：", "Statistics mode:"), _fl);
+            // 下拉框上方：统计模式选择。右对齐到下拉框右边缘（原来是 btn.x+12 左对齐，偏左且会溢出面板）
+            GUIStyle modeLbl = new GUIStyle(_fl);
+            modeLbl.alignment = TextAnchor.MiddleRight;
+            GUI.Label(new Rect(btn.x - 70, btn.y - 18, btn.width + 70, TEXT_H),
+                Loc.T("统计模式选择：", "Statistics mode:"), modeLbl);
 
             if (GUI.Button(btn, "📊 " + names[cur], _btn))
                 _modeDropOpen = !_modeDropOpen;
