@@ -194,6 +194,9 @@ namespace DistrictFinanceManager
         {
             _hub = GetComponent<DistrictFinanceHub>();
             LoadKey();
+            // 打开存档后自动显示面板（居中，见 OnGUI 里的位置初始化），不用先按 F9。
+            // F9 仍然是开关（快捷键可在选项里改）。
+            _vis = true;
         }
 
         private void LoadKey()
@@ -438,7 +441,7 @@ namespace DistrictFinanceManager
                 _panelPos.y + (PAD + 1) * _scale, 80 * _scale, (TITLE_H - 2) * _scale);
             // 语言按钮区域：同上，否则点它会变成拖动面板
             Rect langBtnScreen = new Rect(_panelPos.x + (PW / 2f + 44) * _scale,
-                _panelPos.y + (PAD + 1) * _scale, 96 * _scale, (TITLE_H - 2) * _scale);
+                _panelPos.y + (PAD + 1) * _scale, 108 * _scale, (TITLE_H - 2) * _scale);
 
             if (e.type == EventType.MouseDown && e.button == 0
                 && titleScreen.Contains(e.mousePosition)
@@ -498,8 +501,9 @@ namespace DistrictFinanceManager
                 _helpVis = !_helpVis;
 
             // 顶部：语言切换（在「说明」右边）。点一下即切换并写入设置，选项窗口里也会同步显示。
-            if (GUI.Button(new Rect(PW / 2f + 44, y + 1, 96, TITLE_H - 2),
-                Loc.IsEn ? "Lang: English" : "语言: 中文", _btn))
+            // 标签**始终用英文**：这个按钮主要是给英文使用者找的，中文模式下也必须能认出 "Language"。
+            if (GUI.Button(new Rect(PW / 2f + 44, y + 1, 108, TITLE_H - 2),
+                Loc.IsEn ? "Language: English" : "Language: Chinese", _btn))
             {
                 string next = Loc.IsEn ? "zh" : "en";
                 if (_hub != null && _hub.Settings != null)
