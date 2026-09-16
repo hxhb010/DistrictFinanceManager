@@ -34,7 +34,9 @@ namespace DistrictFinanceManager
 
         public void OnSettingsUI(UIHelperBase helper)
         {
-            if (_settings == null) _settings = ModSettings.Load();
+            // 每次都重新读一遍：面板顶部的「语言」按钮会直接写设置文件，
+            // 这里若不重载，「当前语言」就一直停在打开选项前的那份快照上。
+            _settings = ModSettings.Load();
 
             helper.AddGroup("⚙️ Settings / 设置");
             helper.AddSpace(2);
@@ -74,11 +76,6 @@ namespace DistrictFinanceManager
                 value => { _settings.ShowDebug = value; _settings.Save(); });
 
             helper.AddSpace(4);
-
-            helper.AddCheckbox(
-                "按系统语言自动切换面板（非简/繁中→英文）/ Auto language",
-                _settings.AutoLanguage,
-                value => { _settings.AutoLanguage = value; _settings.Save(); });
 
             helper.AddSpace(16);
 
@@ -160,9 +157,9 @@ namespace DistrictFinanceManager
             string curName = langCur == "en" ? "English" : "中文";
             helper.AddGroup(" Language / 语言 (current: " + curName + ")");
             helper.AddButton("中文",
-                () => { _settings.Language = "zh"; _settings.Save(); });
+                () => { _settings.Language = "zh"; _settings.AutoLanguage = false; _settings.Save(); Loc.Lang = "zh"; });
             helper.AddButton("English",
-                () => { _settings.Language = "en"; _settings.Save(); });
+                () => { _settings.Language = "en"; _settings.AutoLanguage = false; _settings.Save(); Loc.Lang = "en"; });
 
             helper.AddSpace(6);
 

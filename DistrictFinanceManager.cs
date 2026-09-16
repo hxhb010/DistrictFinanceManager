@@ -120,77 +120,13 @@ namespace DistrictFinanceManager
             // 当前周若尚未记录 → 排队，等建成区数据就绪再采（避免把「建成区=0」的垃圾周写进库）
             if (!_series.HasWeek(_lastWeek)) { _pendingWeek = _lastWeek; _hasPendingWeek = true; }
 
-            ApplyAutoLanguage();
+            // 语言不再自动识别：旧的 Steam 语言探测在当前运行库上必然失败
+            // （GetSteamLanguage 会抛 Method not found: System.Type.op_Inequality），
+            // 结果是每次读档都被强行改成英文。改为面板顶部的「语言」按钮手动切换。
         }
 
-        /// <summary>
-        /// 打开存档时按系统（Steam）默认语言自动切换面板语言：
-        /// 若不是简体/繁体中文则切换为英文。可通过设置 AutoLanguage 关闭。
-        /// </summary>
-        private void ApplyAutoLanguage()
-        {
-            try
-            {
-                if (Settings == null || !Settings.AutoLanguage) return;
-                string steamLang = GetSteamLanguage(); // 形如 schinese / tchinese / english / japanese
-                bool isZh = !string.IsNullOrEmpty(steamLang)
-                    && steamLang.ToLowerInvariant().Contains("chinese");
-                string target = isZh ? "zh" : "en";
-                if (Settings.Language != target)
-                {
-                    Settings.Language = target;
-                    Settings.Save();
-                }
-                Loc.Lang = target;
-                Debug.Log("[DFM] Auto language -> " + target + " (steam=" + steamLang + ")");
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning("[DFM] ApplyAutoLanguage failed: " + ex.Message);
-            }
-        }
 
-        /// <summary>读取游戏当前 UI 语言代码（如 schinese/tchinese/english），取不到时返回 null。</summary>
-        private static string GetSteamLanguage()
-        {
-            try
-            {
-                // 1) SteamHelper 的语言相关静态属性
-                Type t = typeof(SteamHelper);
-                foreach (PropertyInfo p in t.GetProperties(BindingFlags.Public | BindingFlags.Static))
-                {
-                    if (p.Name.IndexOf("Language", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        object v = p.GetValue(null, null);
-                        if (v != null) return v.ToString();
-                    }
-                }
-            }
-            catch { }
-            try
-            {
-                // 2) 回退：Steamworks.SteamApps.GetCurrentGameLanguage()
-                Type apps = Type.GetType("Steamworks.SteamApps, Steamworks.NET")
-                         ?? Type.GetType("Steamworks.SteamApps, Steamworks");
-                if (apps != null)
-                {
-                    MethodInfo m = apps.GetMethod("GetCurrentGameLanguage",
-                        BindingFlags.Public | BindingFlags.Static);
-                    if (m != null)
-                    {
-                        object v = m.Invoke(null, null);
-                        if (v != null) return v.ToString();
-                    }
-                }
-            }
-            catch { }
-            return null;
-        }
 
-        /// <summary>
-        /// 清理引用已不存在区划的层级条目（旧存档 / 换地图 / 区划被删时数据会残留）。
-        /// 无效条目会导致点击时读取区划数据出错，这里加载后自动移除。
-        /// </summary>
         /// <summary>
         /// 原版区划的定期维护（每 PRUNE_INTERVAL 秒一次；读档后先宽限 PRUNE_GRACE 秒，游戏暂停时不计时）：
         ///   ① 清理「已被玩家删掉」的区划在层级/组合里留下的幽灵条目。

@@ -205,6 +205,9 @@ namespace DistrictFinanceManager
             if (_hub != null)
             {
                 _hub.RefreshSettings();
+                // 语言：以设置文件为准（在「选项」里改过语言时，面板要跟着切）
+                string lang = (_hub.Settings != null) ? _hub.Settings.Language : s.Language;
+                if (!string.IsNullOrEmpty(lang) && lang != Loc.Lang) Loc.Lang = lang;
                 // 居民/工人权重变化 → 清空缓存即时重算
                 if (Mathf.Abs(s.ResidentWeight - _lastResWeight) > 0.0001f ||
                     Mathf.Abs(s.WorkerWeight - _lastWorkWeight) > 0.0001f)
@@ -271,7 +274,15 @@ namespace DistrictFinanceManager
             }
 
             if (_panelPos.x < 0)
-                _panelPos = new Vector2(Screen.width - PW - 20, 80);
+            {
+                // 首次显示（打开存档）时居中。按当前分辨率和缩放实时算，适配任意分辨率；
+                // 面板比屏幕还大时退化为靠上/靠左 8px，保证标题栏（拖动/按钮）始终在屏内。
+                float pw = PW * _scale;
+                float ph = PH * _scale;
+                _panelPos = new Vector2(
+                    Mathf.Max(8f, (Screen.width - pw) * 0.5f),
+                    Mathf.Max(8f, (Screen.height - ph) * 0.5f));
+            }
 
             HandlePanelInput();
 
@@ -333,6 +344,7 @@ namespace DistrictFinanceManager
 
             string[] helpLines = Loc.IsEn
                 ? new string[] {
+                    "[Hotkey] Press F9 to toggle this panel (changeable in Options; there are also Help / Language buttons at the top of the panel).",
                     "Drag the panel by its top-left; wheel over the top-right to zoom.",
                     "List below for viewing/sorting - switch views: Hierarchy / All districts / City / District / Town / Village.",
                     "[Assign levels]",
@@ -348,6 +360,7 @@ namespace DistrictFinanceManager
                     "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data. Showing 0 right after loading a save or enabling the mod is normal."
                 }
                 : new string[] {
+                    "【快捷键】按 F9 开关本面板（快捷键可在「选项」里修改；面板顶部也有「说明 / 语言」按钮）。",
                     "左上角拖动面板；右上角滚轮缩放面板。",
                     "下方列表用于查看与排序——用 层级/所有区划/市/区县/乡镇/村社区 切换视图。",
                     "【层级分配】",
@@ -423,10 +436,14 @@ namespace DistrictFinanceManager
             // 说明按钮区域：不触发拖动，让按钮正常响应点击
             Rect helpBtnScreen = new Rect(_panelPos.x + (PW / 2f - 40) * _scale,
                 _panelPos.y + (PAD + 1) * _scale, 80 * _scale, (TITLE_H - 2) * _scale);
+            // 语言按钮区域：同上，否则点它会变成拖动面板
+            Rect langBtnScreen = new Rect(_panelPos.x + (PW / 2f + 44) * _scale,
+                _panelPos.y + (PAD + 1) * _scale, 96 * _scale, (TITLE_H - 2) * _scale);
 
             if (e.type == EventType.MouseDown && e.button == 0
                 && titleScreen.Contains(e.mousePosition)
-                && !helpBtnScreen.Contains(e.mousePosition))
+                && !helpBtnScreen.Contains(e.mousePosition)
+                && !langBtnScreen.Contains(e.mousePosition))
             {
                 _dragging = true;
                 e.Use(); // 标题栏按下只用于拖动，不穿透到游戏
@@ -472,12 +489,28 @@ namespace DistrictFinanceManager
             // 右上角：在此处使用滚轮进行缩放 + 百分比（右对齐，靠右显示）
             GUIStyle zoomRight = new GUIStyle(_fl);
             zoomRight.alignment = TextAnchor.MiddleRight;
+            // 文案缩短，给「说明」右侧的语言按钮让位（原来那句会顶到语言按钮上）
             GUI.Label(new Rect(PW - 290, y, 280, TEXT_H),
-                Loc.T("在此处使用滚轮进行缩放 ", "Use mouse wheel to zoom here ") + string.Format("{0:P0}", _scale), zoomRight);
+                Loc.T("滚轮缩放 ", "Zoom ") + string.Format("{0:P0}", _scale), zoomRight);
 
             // 顶部正中：操作说明按钮
             if (GUI.Button(new Rect(PW / 2f - 40, y + 1, 80, TITLE_H - 2), Loc.T("说明", "Help"), _helpVis ? _bn2 : _btn))
                 _helpVis = !_helpVis;
+
+            // 顶部：语言切换（在「说明」右边）。点一下即切换并写入设置，选项窗口里也会同步显示。
+            if (GUI.Button(new Rect(PW / 2f + 44, y + 1, 96, TITLE_H - 2),
+                Loc.IsEn ? "Lang: English" : "语言: 中文", _btn))
+            {
+                string next = Loc.IsEn ? "zh" : "en";
+                if (_hub != null && _hub.Settings != null)
+                {
+                    _hub.Settings.Language = next;
+                    _hub.Settings.AutoLanguage = false; // 手动切换优先，别再被自动识别覆盖
+                    _hub.Settings.Save();
+                }
+                Loc.Lang = next;
+                _finDistrict = 0; // 让详情区立即按新语言重绘
+            }
 
             y += TITLE_H + GAP;
 
