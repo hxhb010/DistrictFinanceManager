@@ -494,8 +494,16 @@ namespace DistrictFinanceManager
                         }
                         if (!havePast) continue;
 
+                        // 当前端的地价：地价常在 ±1 内抖动，若与基准周地价相差不超过 1，
+                        // 就按基准地价算 —— 免得这点噪声被当成"增量"（周库照常记录真实值，不改。
+                        // 基准地价为 0 时不套用，那种情况下整周估值本来就是 0，语义不同。）
+                        double baseLand = series.GetValue(id, pastW, li);
+                        double curLand = (double)liveLand[id];
+                        if (baseLand > 0.0 && System.Math.Abs(curLand - baseLand) <= 1.0)
+                            curLand = baseLand;
+
                         // 当前 = 实时；基准 = 周库目标周（各自用当时的建成区 × 当时的地价）
-                        double cur = liveBuilt[id] * (double)liveLand[id] * mult;
+                        double cur = liveBuilt[id] * curLand * mult;
                         double past = SeriesBuiltValue(series, id, pastW, bi, li, mult);
                         r[id] = cur - past;
                     }
