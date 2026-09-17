@@ -1242,16 +1242,17 @@ namespace DistrictFinanceManager
             int taxPct = TaxRateOf(em, b.Info, taxation);
             double afterTax = 1.0 - taxPct / 100.0;
 
-            // 工业的地价口径与其它用途不同：取【全图平均地价】，林业/农业再 ×0.5
-            // （与 GDP 里工业项的处理一致）。整栋楼的工业工人都用同一个值，故在循环外算一次。
+            // 工业 / 玩家产业的地价口径与其它用途不同：取【全图平均地价】，林业/农业再 ×0.5
+            // （与 GDP 里工业项的处理一致）。整栋楼共用一个值，故在循环外算一次。
             ItemClass.Service svc = b.Info.m_class.m_service;
-            bool industrial = svc == ItemClass.Service.Industrial;
-            double indFactor = 0.0;
-            if (industrial)
+            bool useAvgLand = svc == ItemClass.Service.Industrial
+                           || svc == ItemClass.Service.PlayerIndustry;
+            double avgLandFactor = 0.0;
+            if (useAvgLand)
             {
-                double indLand = GetAverageLandValue();
-                if (IsFarmOrForest(b.Info.m_class.m_subService)) indLand *= 0.5;
-                indFactor = 0.5 + indLand / 35.0;
+                double land = GetAverageLandValue();
+                if (IsFarmOrForest(b.Info.m_class.m_subService)) land *= 0.5;
+                avgLandFactor = 0.5 + land / 35.0;
             }
 
             uint unit = b.m_citizenUnits;
@@ -1278,9 +1279,9 @@ namespace DistrictFinanceManager
 
                     int edu = (int)c.EducationLevel;
                     if (edu < 0 || edu >= BASE_WAGE.Length) edu = 0;
-                    // 工业用全图平均地价（在循环外算好），其它用途用【居住地】地价
+                    // 工业/玩家产业用全图平均地价（在循环外算好），其它用途用【居住地】地价
                     double factor;
-                    if (industrial) factor = indFactor * afterTax;
+                    if (useAvgLand) factor = avgLandFactor * afterTax;
                     else
                     {
                         double lv = dbuf[hd].m_groundData.m_finalLandvalue;
