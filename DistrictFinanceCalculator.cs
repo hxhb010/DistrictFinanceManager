@@ -494,18 +494,14 @@ namespace DistrictFinanceManager
                         }
                         if (!havePast) continue;
 
-                        // 当前端的地价：地价常在 ±1 内抖动，若与基准周地价相差不超过 1，
-                        // 就按基准地价算 —— 免得这点噪声被当成"增量"（周库照常记录真实值，不改。
-                        // 基准地价为 0 时不套用，那种情况下整周估值本来就是 0，语义不同。）
-                        double baseLand = series.GetValue(id, pastW, li);
-                        double curLand = (double)liveLand[id];
-                        if (baseLand > 0.0 && System.Math.Abs(curLand - baseLand) <= 1.0)
-                            curLand = baseLand;
-
-                        // 当前 = 实时；基准 = 周库目标周（各自用当时的建成区 × 当时的地价）
-                        double cur = liveBuilt[id] * curLand * mult;
-                        double past = SeriesBuiltValue(series, id, pastW, bi, li, mult);
-                        r[id] = cur - past;
+                        // **两端同价**：基准周只取建成区面积，价格统一用【当前地价】。
+                        // 若基准端用它自己那周的地价，delta 就变成 建成区 ×(当前地价 − 基准周地价)：
+                        // 地价本身会在 19~23 这种区间来回摆（实测相邻周最多差 ±9），建成区一动不动
+                        // 也会算出几百千的假增量。同价后 delta = (建成区_now − 建成区_base) × 当前地价，
+                        // 只反映真的多盖了多少；面板上还能用「增量 ÷ 地价列 = 新增建筑面积」自行核对。
+                        double pastBuilt = series.GetValue(id, pastW, bi);
+                        double price = (double)liveLand[id] * mult;
+                        r[id] = (liveBuilt[id] - pastBuilt) * price;
                     }
                 }
             }
@@ -527,27 +523,6 @@ namespace DistrictFinanceManager
                 ComputeAggregate(root, self, agg, hub.Hierarchy, visited);
             return agg;
         }
-
-        /// <summary>某一周的「建成区面积 × 地价」（未乘货币/周期系数）。用于给某一周估值。</summary>
-        private static double WeekBuiltValue(DistrictSeriesDB series, ushort id, uint week, int bi, int li)
-        {
-            double built = bi >= 0 ? series.GetValue(id, week, bi) : 0.0;
-            double land = li >= 0 ? series.GetValue(id, week, li) : 0.0;
-            return built * land;
-        }
-
-        /// <summary>
-        /// 某一周的「基准面积 × 地价 × 系数」。**列号必须由调用方传入** ——
-        /// 之前这里自己按名字查 "BuiltArea"，与基准周选取用的列（BuiltValueArea）不是同一列，
-        /// 导致「选的是新列的周、取的是老列的值」，基准全错。
-        /// </summary>
-        private static double SeriesBuiltValue(DistrictSeriesDB series, ushort id, uint week, int bi, int li, double mult)
-        {
-            return WeekBuiltValue(series, id, week, bi, li) * mult;
-        }
-
-        // 注：SeriesBuiltValue（按当周地价估价）已不再用于增量计算 —— 见 GetDistrictBuiltValueDelta
-        // 里「两端同价估价」的说明。保留仅供后续需要「某周的历史估值」时使用。
 
         private static int SeriesFieldIndex(string name)
         {
