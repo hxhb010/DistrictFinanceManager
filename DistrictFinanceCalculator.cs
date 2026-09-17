@@ -1217,6 +1217,16 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
+        /// 林业 / 农业子服务。工业工人的地价本来就用全图平均地价，这两类要再 ×0.5
+        /// （对应 GDP 计算里「农林区划」的减半处理；这里按【建筑自身】的子服务判断，更精确）。
+        /// </summary>
+        private static bool IsFarmOrForest(ItemClass.SubService sub)
+        {
+            return sub == ItemClass.SubService.IndustrialForestry
+                || sub == ItemClass.SubService.IndustrialFarming;
+        }
+
+        /// <summary>
         /// 遍历一栋工作建筑里的在岗市民（m_workBuilding == 本建筑），逐个把税后工资累加到其
         /// **居住地所在区划**的收入累加器。地价用居住地地价，税率用本工作建筑的游戏税率。
         /// </summary>
@@ -1231,6 +1241,18 @@ namespace DistrictFinanceManager
                 taxation = dbuf[workDistrict].m_taxationPoliciesEffect;
             int taxPct = TaxRateOf(em, b.Info, taxation);
             double afterTax = 1.0 - taxPct / 100.0;
+
+            // 工业的地价口径与其它用途不同：取【全图平均地价】，林业/农业再 ×0.5
+            // （与 GDP 里工业项的处理一致）。整栋楼的工业工人都用同一个值，故在循环外算一次。
+            ItemClass.Service svc = b.Info.m_class.m_service;
+            bool industrial = svc == ItemClass.Service.Industrial;
+            double indFactor = 0.0;
+            if (industrial)
+            {
+                double indLand = GetAverageLandValue();
+                if (IsFarmOrForest(b.Info.m_class.m_subService)) indLand *= 0.5;
+                indFactor = 0.5 + indLand / 35.0;
+            }
 
             uint unit = b.m_citizenUnits;
             int guard = 0;
@@ -1256,8 +1278,15 @@ namespace DistrictFinanceManager
 
                     int edu = (int)c.EducationLevel;
                     if (edu < 0 || edu >= BASE_WAGE.Length) edu = 0;
-                    double lv = dbuf[hd].m_groundData.m_finalLandvalue;   // ★ 用【居住地】地价
-                    double wage = BASE_WAGE[edu] * (0.5 + lv / 35.0) * afterTax;
+                    // 工业用全图平均地价（在循环外算好），其它用途用【居住地】地价
+                    double factor;
+                    if (industrial) factor = indFactor * afterTax;
+                    else
+                    {
+                        double lv = dbuf[hd].m_groundData.m_finalLandvalue;
+                        factor = (0.5 + lv / 35.0) * afterTax;
+                    }
+                    double wage = BASE_WAGE[edu] * factor;
 
                     IncomeData inc;
                     if (!_incomePartial.TryGetValue(hd, out inc)) inc = new IncomeData();
