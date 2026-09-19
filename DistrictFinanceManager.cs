@@ -34,12 +34,13 @@ namespace DistrictFinanceManager
         public string SaveName { get; private set; }
         public System.Collections.Generic.List<GroupData> Groups = new System.Collections.Generic.List<GroupData>();
 
+        /// <summary>「自定义政府投资额」视图：区划 ID → 玩家录入的**原始值**（原版周化口径）。
+        /// 显示时才乘显示系数（见 Panel.InvestToDisplay）。按存档存 .inv。</summary>
+        public System.Collections.Generic.Dictionary<ushort, double> Investments =
+            new System.Collections.Generic.Dictionary<ushort, double>();
+
         public ushort SelectedID;
         public int EditingLevel = 1;
-
-        /// <summary>当前存档的有效居民/工人权重（per-save，未保存时回退全局设置）。</summary>
-        public float CurrentResWeight = 0.5f;
-        public float CurrentWorkWeight = 3f;
 
         /// <summary>原版区划工具当前选中的区划 ID（byte，0 表示未选中）。</summary>
         public byte SelectedVanillaDistrict { get; set; }
@@ -79,6 +80,7 @@ namespace DistrictFinanceManager
             SaveName = MakeSaveName();
             Hierarchy = DistrictDataStore.Load(SaveName);
             Groups = DistrictDataStore.LoadGroups(SaveName);
+            Investments = DistrictDataStore.LoadInvestments(SaveName);
             // 失效区划的清理不在这里做：读档瞬间区划可能还没建出来，立即判断会误删整个层级。
             // 改由 Update 里的 TickPruneMissingDistricts() 延迟+二次确认后再清（见该方法注释）。
             _pruneGrace = PRUNE_GRACE;
@@ -92,17 +94,6 @@ namespace DistrictFinanceManager
                 " metaId='" + (Singleton<SimulationManager>.instance != null &&
                     Singleton<SimulationManager>.instance.m_metaData != null
                     ? Singleton<SimulationManager>.instance.m_metaData.m_gameInstanceIdentifier : "") + "'");
-            float savedRes, savedWor;
-            if (DistrictDataStore.TryLoadWeights(SaveName, out savedRes, out savedWor))
-            {
-                CurrentResWeight = savedRes;
-                CurrentWorkWeight = savedWor;
-            }
-            else
-            {
-                CurrentResWeight = Settings.ResidentWeight;
-                CurrentWorkWeight = Settings.WorkerWeight;
-            }
 
             // 周度时间序列库：读档加载历史；当前周若尚未记录则先补记一条（避免读档当周漏记）
             _series = new DistrictSeriesDB();
@@ -185,10 +176,11 @@ namespace DistrictFinanceManager
                         ushort id = reused[i];
                         Hierarchy.Remove(id);
                         for (int gi = 0; gi < Groups.Count; gi++) Groups[gi].Members.Remove(id);
+                        Investments.Remove(id);   // 自定义投资额同样按区划 ID 存，必须一起清
                         int n = _series != null ? _series.DropDistrict(id) : 0;
                         if (n > 0) historyDropped = true;
                         _deadIds.Remove(id);
-                        Debug.Log("[DFM] 区划 ID " + id + " 被复用：已清除其层级/组合归属与 " + n + " 周历史");
+                        Debug.Log("[DFM] 区划 ID " + id + " 被复用：已清除其层级/组合/投资额归属与 " + n + " 周历史");
                     }
                     // 追加式文件里的旧行必须靠整表重写才能清掉
                     if (historyDropped && _series != null) DistrictSeriesStore.Rewrite(_series, SaveName);
@@ -236,8 +228,13 @@ namespace DistrictFinanceManager
                         for (int k = 0; k < dead.Count; k++) { g.Members.Remove(dead[k]); removedMembers++; }
                     }
 
+                    int removedInvest = 0;
+                    for (int i = 0; i < confirmed.Count; i++)
+                        if (Investments.Remove(confirmed[i])) removedInvest++;
+
                     MarkDirty();
-                    Debug.Log("[DFM] 清理失效区划: 层级 " + confirmed.Count + " 项, 组合成员 " + removedMembers + " 项");
+                    Debug.Log("[DFM] 清理失效区划: 层级 " + confirmed.Count + " 项, 组合成员 " +
+                        removedMembers + " 项, 投资额 " + removedInvest + " 项");
                 }
 
                 // ---- 墓碑：连续两次确认「消失」的已创建区划（供下次识别 ID 复用）----
@@ -261,28 +258,6 @@ namespace DistrictFinanceManager
             {
                 Debug.LogWarning("[DFM] TickDistrictMaintenance failed: " + ex.Message);
             }
-        }
-
-        /// <summary>当前存档的居民权重（保存过用存档值，否则用全局设置）。</summary>
-        public float GetEffectiveResWeight()
-        {
-            return CurrentResWeight;
-        }
-
-        /// <summary>当前存档的工人权重（保存过用存档值，否则用全局设置）。</summary>
-        public float GetEffectiveWorkWeight()
-        {
-            return CurrentWorkWeight;
-        }
-
-        /// <summary>把居民/工人权重保存到当前存档，并清缓存让下一帧重算。</summary>
-        public void SaveCurrentWeights(float resWeight, float worWeight)
-        {
-            CurrentResWeight = resWeight;
-            CurrentWorkWeight = worWeight;
-            DistrictDataStore.SaveWeights(resWeight, worWeight, SaveName);
-            if (Calculator != null) Calculator.ClearCache();
-            Debug.Log("[DFM] Weights saved for " + SaveName + ": res=" + resWeight + " wor=" + worWeight);
         }
 
         /// <summary>层级数据按存档区分：用存档唯一标识作为文件名 key，互不覆盖。</summary>
@@ -339,6 +314,7 @@ namespace DistrictFinanceManager
                 {
                     DistrictDataStore.Save(Hierarchy, SaveName);
                     DistrictDataStore.SaveGroups(Groups, SaveName);
+                    DistrictDataStore.SaveInvestments(Investments, SaveName);
                     if (_series != null) DistrictSeriesStore.Flush(_series, SaveName);
                     _dirty = false;
                 }
@@ -383,6 +359,7 @@ namespace DistrictFinanceManager
             {
                 DistrictDataStore.Save(Hierarchy, SaveName);
                 DistrictDataStore.SaveGroups(Groups, SaveName);
+                DistrictDataStore.SaveInvestments(Investments, SaveName);
             }
             if (_instance == this) _instance = null;
         }

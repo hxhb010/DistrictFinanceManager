@@ -107,16 +107,26 @@ namespace DistrictFinanceManager
             _builtDeltaTime = 0f;
             _districtBuiltArea = null;
             _districtBuiltAreaTime = 0f;
+            _districtBuiltWeightArea = null;
+            _districtBuiltWeightAreaTime = 0f;
+            // ⚠️ 这两个是「清零 + 记时间戳」型缓存，时间戳必须用 -∞ 而不是 0f：
+            // 判据是 `Time.time - 时间戳 < CacheLife()`，开局 10 秒内 Time.time < 10，
+            // 写成 0f 会让刚清零的值被当成有效缓存返回 0（工业/玩家/服务的 GDP、平均地价一起读 0）。
             _totalCityGDP = 0;
-            _totalCityGDPTime = 0f;
+            _totalCityGDPTime = float.NegativeInfinity;
             _avgLandValue = 0;
-            _avgLandValueTime = 0f;
-            _allDensity = null;
-            _allDensityTime = 0f;
+            _avgLandValueTime = float.NegativeInfinity;
             _districtIncomeNum = null;
             _districtIncomeNumTime = 0f;
-            // 注意：不要清 _allBuiltCells / _allIncome —— 它们是建筑派生统计（与设置/权重无关），
-            // 且跨周采样前会先 ClearCache，若清掉会导致采样读到的建成面积/收入为 0。
+            // ⚠️ 以下都是**建筑派生统计**，与设置/权重无关，绝不能在 ClearCache 里清：
+            //   _allDensity（密度分桶 + GDP 分子） / _allBuiltCells（建成区） /
+            //   _allBuiltWeightCells（加权建成区） / _allIncome（收入分子）
+            // 原因：**每次跨游戏周** Hub.Update 都会先 ClearCache 再采样，清掉的话要等
+            // 下一轮建筑遍历跑完（UpdateInterval×3 秒）才有值 ——
+            //   · 清 _allIncome    → 人均可支配一整轮读作 0
+            //   · 清 _allDensity   → **GDP / 人口密度在 0 和真值之间来回跳**（2026-09-18 踩到）
+            //   · 清 _allBuiltCells → 把「建成区=0」的垃圾周写进周库，污染增量基准
+            // 显示模式等设置只影响显示层（GetDisplayFactor / 地价倍率），不需要靠清这些来生效。
         }
 
         private static ushort _logDistrict;
@@ -134,6 +144,8 @@ namespace DistrictFinanceManager
         private float _builtDeltaTime;
         private double[] _districtBuiltArea;  // 建成区面积缓存
         private float _districtBuiltAreaTime;
+        private double[] _districtBuiltWeightArea;  // 加权建成区面积缓存（增量用）
+        private float _districtBuiltWeightAreaTime;
         private static System.Reflection.FieldInfo _incomeField;
         private static System.Reflection.FieldInfo _totalIncomeField;
 
@@ -181,10 +193,7 @@ namespace DistrictFinanceManager
             for (uint d = 1; d < dsize; d++)
             {
                 if ((dbuf[d].m_flags & District.Flags.Created) == 0) continue;
-                District dd = dbuf[d];
-                long land = dd.m_groundData.m_finalLandvalue;
-                long pop = dd.m_populationData.m_finalCount;
-                gdp[d] = CalcGDP(dd, (int)land, (int)pop, ComW(dd), IndW(dd), OffW(dd), PlayerW(dd));
+                gdp[d] = CalcGDP(GetDensity((ushort)d));
             }
             _districtGDP = gdp;
             _districtGDPTime = Time.time;
@@ -354,9 +363,12 @@ namespace DistrictFinanceManager
         /// <summary>
         /// 「建筑价值增量」用的加权占地面积（m²）= Σ 建筑占地格数 × 64 × 用途权重。
         /// **不含空隙系数**（增量用原始面积），也不做上限截断 —— 与「建成区面积」是两个口径。
+        /// 结果缓存（同 GetDistrictBuiltArea，缓存键为空则重算，不会像 _allDensity 那样读到空）。
         /// </summary>
         public double[] GetDistrictBuiltWeightArea()
         {
+            if (_districtBuiltWeightArea != null && Time.time - _districtBuiltWeightAreaTime < CacheLife())
+                return _districtBuiltWeightArea;
             double[] r = new double[256];
             Dictionary<ushort, double> cells = _allBuiltWeightCells;
             if (cells != null)
@@ -364,6 +376,8 @@ namespace DistrictFinanceManager
                 foreach (KeyValuePair<ushort, double> kv in cells)
                     if (kv.Key < 256) r[kv.Key] = kv.Value * 64.0;
             }
+            _districtBuiltWeightArea = r;
+            _districtBuiltWeightAreaTime = Time.time;
             return r;
         }
 
@@ -645,12 +659,14 @@ namespace DistrictFinanceManager
                 r.PlayerWorkers = (int)d.m_playerData.m_finalAliveCount;
 
                 // 密度细分默认读取（一次全城遍历缓存，面板显示由“显示调试信息”控制）
-                DensityData den;
-                if (!GetAllDensity().TryGetValue(districtId, out den)) den = new DensityData();
+                DensityData den = GetDensity(districtId);
                 r.ResLow = den.ResLow;
                 r.ResHigh = den.ResHigh;
                 r.ComLow = den.ComLow;
                 r.ComHigh = den.ComHigh;
+                // 公共服务建筑的在岗市民：游戏的区划数据里没有这一项，用建筑遍历数出来的补上
+                // （2026-09-18「公共服务工人一并对齐」）
+                r.Workers += den.ServiceWorkers;
                 r.ResLowGDP = (long)r.ResLow * r.LandValue;
                 r.ResHighGDP = (long)r.ResHigh * r.LandValue;
                 r.ComLowGDP = (long)r.ComLow * r.LandValue;
@@ -674,13 +690,13 @@ namespace DistrictFinanceManager
                 r.IncomeNum = GetDistrictIncomeNumerator()[districtId];
                 r.DisposableIncome = r.Population > 0 ? r.IncomeNum / r.Population : 0.0;
 
-                r.GDP = CalcGDP(d, r.LandValue, r.Population,
-                    r.ComWorkers, r.IndWorkers, r.OffWorkers, r.PlayerWorkers);
+                r.GDP = CalcGDP(den);
                 // r.Expense = CountExpenses(dm, districtId); // 支出暂时注释掉
 
                 r.Diag = "地价=" + r.LandValue + " 平均地价=" + GetAverageLandValue().ToString("0.00") +
                     " 住低=" + r.ResLow + " 住高=" + r.ResHigh + " 商低=" + r.ComLow + " 商高=" + r.ComHigh +
-                    " 工=" + r.IndWorkers + " 办=" + r.OffWorkers + " 玩=" + r.PlayerWorkers;
+                    " 工=" + r.IndWorkers + " 办=" + r.OffWorkers + " 玩=" + r.PlayerWorkers +
+                    " 服=" + den.ServiceWorkers;
 
                 // 自身也计入合计
                 r.AggGDP = r.GDP;
@@ -787,10 +803,7 @@ namespace DistrictFinanceManager
             for (uint d = 1; d < dsize; d++)
             {
                 if ((dbuf[d].m_flags & District.Flags.Created) == 0) continue;
-                District dd = dbuf[d];
-                long land = dd.m_groundData.m_finalLandvalue;
-                long pop = dd.m_populationData.m_finalCount;
-                total += CalcGDP(dd, (int)land, (int)pop, ComW(dd), IndW(dd), OffW(dd), PlayerW(dd));
+                total += CalcGDP(GetDensity((ushort)d));
             }
             _totalCityGDP = total;
             _totalCityGDPTime = Time.time;
@@ -888,44 +901,154 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
-        /// 加权 GDP = 地价 ×（居民×a + 工人×b），其中 b = ratio×a 且 a + b = 2。
-        /// a+b=2 保持与旧模型（居民+工人）相同的量级；ratio 为「工人产出/居民」比值
-        /// （默认 2.5，可在选项里 0.5~5 调整）。
+        /// 地价是否用【全图平均地价】：工业 / 玩家产业 / 公共服务建筑用平均地价，
+        /// 住宅 / 商业 / 办公用建筑所在地格的地价。**收入与 GDP 共用这一条规则**（只此一处）。
         /// </summary>
-        private static double CalcGDP(District d, int landValue, int population,
-            int comWorkers, int indWorkers, int offWorkers, int playerWorkers)
+        private static bool UseAverageLand(ItemClass.Service svc)
         {
-            double resW = GetResWeight();
-            double worW = GetWorkWeight();
+            return svc == ItemClass.Service.Industrial
+                || svc == ItemClass.Service.PlayerIndustry
+                || IsServiceWorkplace(svc);
+        }
 
-            double gdp = population * landValue * resW; // 居民×区域地价×居民权重
+        /// <summary>
+        /// 带本轮遍历 memo 的建筑地价 —— **GDP 与工资都必须走这个入口**，
+        /// 别再直接调 BuildingLandValue（否则每名在岗市民都要查一次地价格网）。
+        /// </summary>
+        private int CachedLandValue(Building b, ushort buildingId, byte districtId, District[] dbuf)
+        {
+            if (_landValuePartial == null) _landValuePartial = new Dictionary<ushort, int>();
+            int v;
+            if (_landValuePartial.TryGetValue(buildingId, out v)) return v;
+            v = BuildingLandValue(b, districtId, dbuf);
+            _landValuePartial[buildingId] = v;
+            return v;
+        }
 
-            // 工业：农业/林业区划用区域地价×居民权重，否则用全地图平均地价×工人权重
-            bool agri = (d.m_specializationPolicies & DistrictPolicies.Specialization.Farming) != 0
-                     || (d.m_specializationPolicies & DistrictPolicies.Specialization.Forest) != 0;
-            double avgLand = GetAverageLandValue();
-            if (agri)
-                gdp += indWorkers * avgLand * (worW / 3.0);   // 农林：平均地价×(工人权重÷3)
-            else
-                gdp += indWorkers * avgLand * worW;   // 其他工业：平均地价×工人权重
+        /// <summary>
+        /// 建筑所在地格的地价（游戏地价格网的单格值，`ImmaterialResourceManager.Resource.LandValue`）。
+        /// 取不到（资源网未就绪 / 返回 0）时回退到该建筑所在区划的平均地价，避免整片算成 0。
+        /// ⚠️ 直接用它会按调用次数重复查格网；统计路径请走 CachedLandValue()。
+        /// </summary>
+        private static int BuildingLandValue(Building b, byte districtId, District[] dbuf)
+        {
+            try
+            {
+                ImmaterialResourceManager irm = Singleton<ImmaterialResourceManager>.instance;
+                if (irm != null)
+                {
+                    int v;
+                    irm.CheckLocalResource(ImmaterialResourceManager.Resource.LandValue,
+                        b.m_position, out v);
+                    if (v > 0) return v;
+                }
+            }
+            catch (System.Exception) { }
+            if (districtId != 0 && dbuf != null && districtId < dbuf.Length)
+                return dbuf[districtId].m_groundData.m_finalLandvalue;
+            return 0;
+        }
 
-            // 商业+办公工人 × 区域地价 × 工人权重
-            gdp += (comWorkers + offWorkers) * landValue * worW;
+        /// <summary>建筑当前等级（1 起）。growable 拿 Building.m_level，取不到再退到 Info 上的等级。</summary>
+        private static int BuildingLevel(Building b, BuildingInfo info)
+        {
+            int lv = (int)b.m_level;
+            if (lv <= 0 && info != null) lv = (int)info.m_class.m_level;
+            return lv;
+        }
 
-            // 玩家（工业等）按一般工业处理：全地图平均地价 × 工人权重
-            gdp += playerWorkers * GetAverageLandValue() * worW;
+        // ---- GDP 权重表（2026-09-18）----
+        // 依据：各区划类型的现实产出强度，按建筑等级递增。住宅到 5 级，
+        // 商业/办公/普通工业到 3 级（超出取最高档）。specialized/玩家/公共服务无等级，取固定值。
+        private static readonly double[] GDP_W_RES_LOW = { 0.39, 0.41, 0.44, 0.47, 0.50 };
+        private static readonly double[] GDP_W_RES_HIGH = { 0.40, 0.45, 0.50, 0.55, 0.60 };
+        private static readonly double[] GDP_W_COM_LOW = { 1.85, 2.20, 2.50, 2.50, 2.50 };
+        private static readonly double[] GDP_W_COM_HIGH = { 1.94, 2.42, 3.00, 3.00, 3.00 };
+        private static readonly double[] GDP_W_OFFICE = { 2.19, 2.84, 3.50, 3.50, 3.50 };
+        private static readonly double[] GDP_W_INDUSTRY = { 2.07, 2.48, 3.00, 3.00, 3.00 };
 
-            return gdp * GetDisplayFactor();
+        /// <summary>按等级取表值，等级越界（0 或超出表长）夹到有效范围。</summary>
+        private static double AtLevel(double[] tbl, int level)
+        {
+            if (level < 1) level = 1;
+            if (level > tbl.Length) level = tbl.Length;
+            return tbl[level - 1];
+        }
+
+        /// <summary>
+        /// 农林（林业 / 农业）在表值基础上**再乘**的系数（2026-09-18）：
+        /// 林业 1.50→1.05，农业 1.00→0.70。只作用于普通工业区的
+        /// IndustrialForestry / IndustrialFarming（玩家产业不细分，仍按 3.00）。
+        /// </summary>
+        private const double GDP_AGRI_FOREST_FACTOR = 0.7;
+
+        /// <summary>
+        /// GDP 权重：按建筑类型 + 等级取值。
+        ///   住宅：低密度 0.39~0.50 / 高密度 0.40~0.60（按等级 1~5）
+        ///   低密度商业 1.85~2.50 / 高密度商业 1.94~3.00（1~3）
+        ///   办公 2.19~3.50 / 普通工业 2.07~3.00（1~3）
+        ///   林业 1.50×0.7=1.05 / 农业 1.00×0.7=0.70 / 矿业 2.00 / 石油 4.00 / 玩家产业 3.00（无等级）
+        ///   公共服务建筑 2.00（无等级，2026-09-18 由 3.00 改为 2.00）
+        /// 未列明的返回 0（= 不计入 GDP）。
+        /// </summary>
+        private static double GdpWeightOf(BuildingInfo info, int level)
+        {
+            if (info == null) return 0.0;
+            ItemClass.Service svc = info.m_class.m_service;
+            ItemClass.SubService sub = info.m_class.m_subService;
+
+            if (svc == ItemClass.Service.Residential)
+            {
+                if (sub == ItemClass.SubService.ResidentialHigh
+                    || sub == ItemClass.SubService.ResidentialHighEco)
+                    return AtLevel(GDP_W_RES_HIGH, level);
+                return AtLevel(GDP_W_RES_LOW, level);
+            }
+            if (svc == ItemClass.Service.Commercial)
+            {
+                // CommercialEco（生态商业）只有一个枚举、不分高低密度，按低密度计
+                if (sub == ItemClass.SubService.CommercialHigh) return AtLevel(GDP_W_COM_HIGH, level);
+                return AtLevel(GDP_W_COM_LOW, level);
+            }
+            if (svc == ItemClass.Service.Office) return AtLevel(GDP_W_OFFICE, level);
+            if (svc == ItemClass.Service.Industrial)
+            {
+                if (sub == ItemClass.SubService.IndustrialForestry) return 1.50 * GDP_AGRI_FOREST_FACTOR;
+                if (sub == ItemClass.SubService.IndustrialFarming) return 1.00 * GDP_AGRI_FOREST_FACTOR;
+                if (sub == ItemClass.SubService.IndustrialOre) return 2.00;
+                if (sub == ItemClass.SubService.IndustrialOil) return 4.00;
+                return AtLevel(GDP_W_INDUSTRY, level);   // IndustrialGeneric 及未列明的工业子服务
+            }
+            if (svc == ItemClass.Service.PlayerIndustry) return 3.00;
+            if (IsServiceWorkplace(svc)) return 2.00;
+            return 0.0;
+        }
+
+        /// <summary>
+        /// GDP = 居民项 + 工人项。权重**只取权重表**（GDP_W_* 与各类固定值），
+        /// 2026-09-18 起不再有全局滑杆（原「居民权重/工人权重」已整条删除）。
+        /// 分子在建筑分片遍历里累加：Σ 人数 × 地价 × 权重(类型, 等级)，见 DensityData。
+        /// 注：地价用建筑所在地格地价（住宅/商业/办公）或全图平均地价（工业/玩家产业/公共服务）。
+        /// </summary>
+        private static double CalcGDP(DensityData den)
+        {
+            return (den.GdpResNum + den.GdpWorkNum) * GetDisplayFactor();
         }
 
         private Dictionary<ushort, DensityData> _allDensity;
-        private float _allDensityTime;
         private bool _densityBuilding;
         private uint _densityProgress;
         private uint _densityPerTick;
         private uint _densityTotal;
         private Dictionary<ushort, DensityData> _densityPartial;
         private static readonly Dictionary<ushort, DensityData> _emptyDensity = new Dictionary<ushort, DensityData>();
+
+        /// <summary>
+        /// 「建筑地格地价」的**本轮遍历内 memo**（键 = 建筑 ID）。
+        /// GDP 累加与工资的房子地价共用同一个 memo → 每栋楼每轮只真正查一次地价格网。
+        /// 惰性填充，所以不依赖遍历顺序；随每轮遍历重建（见 TickDensityBuild）。
+        /// </summary>
+        private Dictionary<ushort, int> _landValuePartial;
 
         // 建成区：每区划的建成格数（Σ 建筑 m_width×m_length，每格 64 m²），在密度分片遍历里顺带统计
         private Dictionary<ushort, long> _allBuiltCells;
@@ -1006,25 +1129,6 @@ namespace DistrictFinanceManager
             return _avgLandValue;
         }
 
-        private static int ComW(District d) { return (int)d.m_commercialData.m_finalAliveCount; }
-        private static int IndW(District d) { return (int)d.m_industrialData.m_finalAliveCount; }
-        private static int OffW(District d) { return (int)d.m_officeData.m_finalAliveCount; }
-        private static int PlayerW(District d) { return (int)d.m_playerData.m_finalAliveCount; }
-
-        private static double GetResWeight()
-        {
-            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
-            if (hub != null) return hub.GetEffectiveResWeight();
-            return 0.5;
-        }
-
-        private static double GetWorkWeight()
-        {
-            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
-            if (hub != null) return hub.GetEffectiveWorkWeight();
-            return 3.0;
-        }
-
         /// <summary>现实化数据换算系数（GDP/人均）：0 原版按周×1，1 原版按年×52，2 人民币×2625，3 美元×375。（地价另按 ×420/×60 换算）</summary>
         public static double GetDisplayFactor()
         {
@@ -1054,6 +1158,13 @@ namespace DistrictFinanceManager
         private struct DensityData
         {
             public int ResLow, ResHigh, ComLow, ComHigh;
+            // GDP 分子（在建筑分片遍历里累加）：Σ 人数 × 地价 × 权重(类型, 等级)。
+            // 居民/工人两个滑杆不在这里乘 —— 留到 CalcGDP 里现乘，玩家拖滑杆才能立刻生效。
+            public double GdpResNum;    // 住宅居民项
+            public double GdpWorkNum;   // 工作场所工人项
+            // 公共服务建筑的在岗市民数。游戏的区划数据（m_commercialData 等）里没有公共服务这一项，
+            // 由我们自己数，「工作人数」列会额外加上它。
+            public int ServiceWorkers;
         }
 
         /// <summary>
@@ -1073,6 +1184,14 @@ namespace DistrictFinanceManager
         private Dictionary<ushort, DensityData> GetAllDensity()
         {
             return _allDensity ?? _emptyDensity;
+        }
+
+        /// <summary>取某区划的密度/GDP 分子数据，没有则返回全 0（GDP 会算成 0）。</summary>
+        private DensityData GetDensity(ushort districtId)
+        {
+            DensityData den;
+            if (GetAllDensity().TryGetValue(districtId, out den)) return den;
+            return new DensityData();
         }
 
         /// <summary>
@@ -1102,6 +1221,7 @@ namespace DistrictFinanceManager
                     _builtCellsPartial = new Dictionary<ushort, long>();
                     _builtWeightPartial = new Dictionary<ushort, double>();
                     _incomePartial = new Dictionary<ushort, IncomeData>();
+                    _landValuePartial = new Dictionary<ushort, int>();   // 地价 memo 随每轮重建
                     _densityBuilding = true;
                 }
 
@@ -1124,7 +1244,6 @@ namespace DistrictFinanceManager
                     _allBuiltCells = _builtCellsPartial;
                     _allBuiltWeightCells = _builtWeightPartial;
                     _allIncome = _incomePartial;
-                    _allDensityTime = Time.time;
                     _densityBuilding = false;
                 }
             }
@@ -1178,12 +1297,16 @@ namespace DistrictFinanceManager
 
                 DensityData dd;
                 if (!_densityPartial.TryGetValue(d, out dd)) dd = new DensityData();
+                int lv = BuildingLevel(b, info);
 
                 if (info.m_class.m_service == ItemClass.Service.Residential)
                 {
                     int n = CountInBuilding(b, units, citizens, citizenSize, (ushort)i, true);
                     bool low = info.m_class.m_subService == ItemClass.SubService.ResidentialLow;
                     if (low) dd.ResLow += n; else dd.ResHigh += n;
+
+                    // GDP 居民项：居民数 × 建筑地价 × 住宅权重(密度, 等级)
+                    dd.GdpResNum += (double)n * CachedLandValue(b, (ushort)i, d, dbuf) * GdpWeightOf(info, lv);
 
                     // 财产收入：每个居民各计一次；地价取本区划地价，再扣住宅密度税
                     IncomeData inc;
@@ -1193,18 +1316,38 @@ namespace DistrictFinanceManager
                     inc.ResTaxPct = resTax;
                     _incomePartial[d] = inc;
                 }
-                else if (info.m_class.m_service == ItemClass.Service.Commercial)
+                else if (IsIncomeWorkplace(info.m_class.m_service))
                 {
+                    // 工作场所（商/工/办/玩家产业/公共服务）：本楼在岗市民数
                     int n = CountInBuilding(b, units, citizens, citizenSize, (ushort)i, false);
-                    bool low = info.m_class.m_subService == ItemClass.SubService.CommercialLow;
-                    if (low) dd.ComLow += n; else dd.ComHigh += n;
+
+                    // 商业沿用「非低密度即高密度」的既有分桶（人口密度统计口径，本次不动）
+                    if (info.m_class.m_service == ItemClass.Service.Commercial)
+                    {
+                        bool low = info.m_class.m_subService == ItemClass.SubService.CommercialLow;
+                        if (low) dd.ComLow += n; else dd.ComHigh += n;
+                    }
+
+                    // GDP 工人项：在岗人数 × 地价 × 权重(类型, 等级)。
+                    // 地价：工业/玩家产业/公共服务用全图平均地价，商业/办公用建筑地价
+                    double w = GdpWeightOf(info, lv);
+                    if (w > 0.0)
+                    {
+                        double land = UseAverageLand(info.m_class.m_service)
+                            ? GetAverageLandValue()
+                            : (double)CachedLandValue(b, (ushort)i, d, dbuf);
+                        dd.GdpWorkNum += (double)n * land * w;
+                    }
+
+                    // 公共服务建筑的在岗人数单独记账（游戏区划数据里没有这一项）
+                    if (IsServiceWorkplace(info.m_class.m_service)) dd.ServiceWorkers += n;
                 }
                 _densityPartial[d] = dd;
             }
         }
 
         /// <summary>
-        /// 计入收入统计的工作场所：商/工/办/玩家产业。
+        /// 计入收入统计的工作场所：商/工/办/玩家产业 + 公共服务建筑。
         /// （注意与既有的 IsWorkplace(ItemClass) 区分：那个只含商/工/办，用于「工作人数」统计，
         ///   改动它会变动既有数值，故此处另起一名。）
         /// </summary>
@@ -1213,22 +1356,98 @@ namespace DistrictFinanceManager
             return svc == ItemClass.Service.Commercial
                 || svc == ItemClass.Service.Industrial
                 || svc == ItemClass.Service.Office
-                || svc == ItemClass.Service.PlayerIndustry;
+                || svc == ItemClass.Service.PlayerIndustry
+                || IsServiceWorkplace(svc);
         }
 
         /// <summary>
-        /// 林业 / 农业子服务。工业工人的地价本来就用全图平均地价，这两类要再 ×0.5
-        /// （对应 GDP 计算里「农林区划」的减半处理；这里按【建筑自身】的子服务判断，更精确）。
+        /// 计入收入统计的公共服务建筑：公园(Beautification)、垃圾、医疗、警察、教育、消防、灾害，
+        /// 以及大学 DLC(PlayerEducation) 与博物馆/大学体育(Museums/VarsitySports)。
+        /// 刻意与 IsExpenseBuilding 分开：那个用于「支出」统计，改它会变动既有数值。
         /// </summary>
-        private static bool IsFarmOrForest(ItemClass.SubService sub)
+        private static bool IsServiceWorkplace(ItemClass.Service svc)
         {
-            return sub == ItemClass.SubService.IndustrialForestry
-                || sub == ItemClass.SubService.IndustrialFarming;
+            if (svc == ItemClass.Service.Beautification) return true;   // 公园建筑
+            switch (svc)
+            {
+                case ItemClass.Service.Garbage:
+                case ItemClass.Service.HealthCare:
+                case ItemClass.Service.PoliceDepartment:
+                case ItemClass.Service.Education:
+                case ItemClass.Service.FireDepartment:
+                case ItemClass.Service.Disaster:
+                case ItemClass.Service.PlayerEducation:
+                case ItemClass.Service.Museums:
+                case ItemClass.Service.VarsitySports:
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>有等级的收入建筑满级数（商业 / 办公 / 普通工业区都是 3 级）。</summary>
+        private const int INCOME_MAX_LEVEL = 3;
+
+        /// <summary>每降一个等级的收入权重折扣。</summary>
+        private const double INCOME_LEVEL_STEP = 0.85;
+
+        /// <summary>
+        /// 有等级的建筑：表值 = **满级**权重，每低一级 ×0.85。
+        /// 满级 3 → 1.00×；2 级 → 0.85×；1 级 → 0.7225×。
+        /// </summary>
+        private static double LeveledIncomeWeight(double maxWeight, int level)
+        {
+            if (level < 1) level = 1;
+            if (level > INCOME_MAX_LEVEL) level = INCOME_MAX_LEVEL;
+            double w = maxWeight;
+            for (int i = level; i < INCOME_MAX_LEVEL; i++) w *= INCOME_LEVEL_STEP;
+            return w;
+        }
+
+        /// <summary>
+        /// 工资权重，乘在「基准工资 × 地价系数 × 税后」之后。
+        /// 表值（2026-09-18）是**最高等级**的权重，等级越低按 0.85 递减（见 LeveledIncomeWeight）。
+        ///   办公 1.65；玩家产业 1.50；公共服务建筑 1.50
+        ///   商业：高密度 1.20，其余（含生态商业、休闲/旅游/壁到壁）按低密度 1.05
+        ///   普通工业区按子服务：石油 1.50 / 矿业 1.11 / 普通工业 0.88 / 林业 0.57 / 农业 0.55
+        /// 无等级的类型（玩家产业、专业化工农业、公共服务建筑）直接用表值。
+        /// 未列明的按 1.00 中性计。
+        /// </summary>
+        private static double IncomeWeightOf(BuildingInfo info, int level)
+        {
+            if (info == null) return 1.00;
+            ItemClass.Service svc = info.m_class.m_service;
+            ItemClass.SubService sub = info.m_class.m_subService;
+
+            if (svc == ItemClass.Service.Office) return LeveledIncomeWeight(1.65, level);
+            if (svc == ItemClass.Service.PlayerIndustry) return 1.50;
+            if (IsServiceWorkplace(svc)) return 1.50;
+
+            if (svc == ItemClass.Service.Commercial)
+            {
+                // CommercialEco（生态商业）游戏里只有一个枚举、不分高低密度，按低密度计
+                if (sub == ItemClass.SubService.CommercialHigh)
+                    return LeveledIncomeWeight(1.20, level);
+                return LeveledIncomeWeight(1.05, level);
+            }
+
+            if (svc == ItemClass.Service.Industrial)
+            {
+                // 专业化工农业无等级（与 GDP 表的「无等级」一致），直接用表值
+                if (sub == ItemClass.SubService.IndustrialOil) return 1.50;
+                if (sub == ItemClass.SubService.IndustrialOre) return 1.11;
+                if (sub == ItemClass.SubService.IndustrialForestry) return 0.57;
+                if (sub == ItemClass.SubService.IndustrialFarming) return 0.55;
+                return LeveledIncomeWeight(0.88, level);   // IndustrialGeneric 及未列明的工业子服务
+            }
+
+            return 1.00;
         }
 
         /// <summary>
         /// 遍历一栋工作建筑里的在岗市民（m_workBuilding == 本建筑），逐个把税后工资累加到其
-        /// **居住地所在区划**的收入累加器。地价用居住地地价，税率用本工作建筑的游戏税率。
+        /// **居住地所在区划**的收入累加器。税率用本工作建筑的游戏税率；
+        /// 地价 =（工作点地价 + 房子地价）÷ 2，工作点用全图平均地价（工业/玩家产业/公共服务建筑）
+        /// 或工作建筑地格地价（商业/办公），房子用居住建筑地格地价。
         /// </summary>
         private void AccumWages(Building b, ushort buildingId, byte workDistrict, DistrictManager dm,
             CitizenUnit[] units, Citizen[] citizens, uint citizenSize,
@@ -1242,18 +1461,18 @@ namespace DistrictFinanceManager
             int taxPct = TaxRateOf(em, b.Info, taxation);
             double afterTax = 1.0 - taxPct / 100.0;
 
-            // 工业 / 玩家产业的地价口径与其它用途不同：取【全图平均地价】，林业/农业再 ×0.5
-            // （与 GDP 里工业项的处理一致）。整栋楼共用一个值，故在循环外算一次。
+            // 工资地价 = (工作点地价 + 房子地价) ÷ 2   （2026-09-18 改）
+            //   工作点地价：工业 / 玩家产业 / 公共服务建筑 →【全图平均地价】
+            //               商业 / 办公 → 工作建筑所在地格地价
+            //   房子地价　：工人居住建筑所在地格地价（每个工人各取各的，在循环里算）
+            // 工作点那一端整栋楼共用一个值，故在循环外算一次。
             ItemClass.Service svc = b.Info.m_class.m_service;
-            bool useAvgLand = svc == ItemClass.Service.Industrial
-                           || svc == ItemClass.Service.PlayerIndustry;
-            double avgLandFactor = 0.0;
-            if (useAvgLand)
-            {
-                double land = GetAverageLandValue();
-                if (IsFarmOrForest(b.Info.m_class.m_subService)) land *= 0.5;
-                avgLandFactor = 0.5 + land / 35.0;
-            }
+            double workLand = UseAverageLand(svc)
+                ? GetAverageLandValue()
+                : (double)CachedLandValue(b, buildingId, workDistrict, dbuf);
+
+            // 工资权重：按工作建筑的类型 + 等级区分（表值是满级权重，每低一级 ×0.85）
+            double weight = IncomeWeightOf(b.Info, BuildingLevel(b, b.Info));
 
             uint unit = b.m_citizenUnits;
             int guard = 0;
@@ -1279,15 +1498,10 @@ namespace DistrictFinanceManager
 
                     int edu = (int)c.EducationLevel;
                     if (edu < 0 || edu >= BASE_WAGE.Length) edu = 0;
-                    // 工业/玩家产业用全图平均地价（在循环外算好），其它用途用【居住地】地价
-                    double factor;
-                    if (useAvgLand) factor = avgLandFactor * afterTax;
-                    else
-                    {
-                        double lv = dbuf[hd].m_groundData.m_finalLandvalue;
-                        factor = (0.5 + lv / 35.0) * afterTax;
-                    }
-                    double wage = BASE_WAGE[edu] * factor;
+                    // 工资地价 = (工作点地价 + 房子地价) ÷ 2
+                    double homeLand = CachedLandValue(bbuf[home], home, hd, dbuf);
+                    double factor = (0.5 + (workLand + homeLand) / 2.0 / 35.0) * afterTax;
+                    double wage = BASE_WAGE[edu] * factor * weight;
 
                     IncomeData inc;
                     if (!_incomePartial.TryGetValue(hd, out inc)) inc = new IncomeData();

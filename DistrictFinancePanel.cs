@@ -148,8 +148,16 @@ namespace DistrictFinanceManager
 
         private Vector2 _scroll;
         private Vector2 _sortScroll;
-        private int _viewMode; // 0=层级 1=组合 2=所有区划 3=市 4=区县 5=乡镇 6=村社区
+        private int _viewMode; // 0=层级 1=组合 2=所有区划 3=市 4=区县 5=乡镇 6=村社区 7=自定义(政府投资额)
+        /// <summary>「自定义政府投资额」视图的模式号。与组合等视图并列，但**自成一体**：
+        /// 不接入全局排序系统（`_sortKey`），自带排序/取色/格式化。</summary>
+        private const int VIEW_INVEST = 7;
         private bool _filterSubtree;
+
+        // ---- 「自定义政府投资额」视图的状态 ----
+        private string _investInput = "";      // 输入框内容（与 _groupNameInput 同款模式）
+        private int _investUnit;               // 0=k(×1000) 1=m(×1e6) 2=b(×1e9)，默认 k
+        private ushort _investEditTarget;      // 正在编辑哪个区划（0 = 未选）
         private int _activeGroupIdx = -1;
         /// <summary>当前“选中”并在顶部显示合计详情的组合索引（-1 = 无，与区划选择互斥）。</summary>
         private int _detailGroup = -1;
@@ -178,11 +186,9 @@ namespace DistrictFinanceManager
         private DistrictFinanceCalculator.FinanceResult _fin;
         private ushort _finDistrict;
         private float _finRefresh;
-        private float _lastResWeight = -1f;
-        private float _lastWorkWeight = -1f;
         private int _lastDisplayMode = -1;
 
-        private GUIStyle _ti, _ts, _fl, _fv, _pcv, _btn, _btnWrap, _bn2, _hdr, _nodeBtn, _diag, _legend, _rankBtn, _shield;
+        private GUIStyle _ti, _fl, _fv, _pcv, _btn, _btnWrap, _hdr, _nodeBtn, _diag, _legend, _rankBtn, _shield;
         private bool _styled;
         private Texture2D _bgTex;
 
@@ -211,15 +217,6 @@ namespace DistrictFinanceManager
                 // 语言：以设置文件为准（在「选项」里改过语言时，面板要跟着切）
                 string lang = (_hub.Settings != null) ? _hub.Settings.Language : s.Language;
                 if (!string.IsNullOrEmpty(lang) && lang != Loc.Lang) Loc.Lang = lang;
-                // 居民/工人权重变化 → 清空缓存即时重算
-                if (Mathf.Abs(s.ResidentWeight - _lastResWeight) > 0.0001f ||
-                    Mathf.Abs(s.WorkerWeight - _lastWorkWeight) > 0.0001f)
-                {
-                    _lastResWeight = s.ResidentWeight;
-                    _lastWorkWeight = s.WorkerWeight;
-                    _hub.Calculator.ClearCache();
-                    _finDistrict = 0;
-                }
                 // 现实化数据切换 → 立即重算
                 if (s.DisplayMode != _lastDisplayMode)
                 {
@@ -349,7 +346,7 @@ namespace DistrictFinanceManager
                 ? new string[] {
                     "[Hotkey] Press F9 to toggle this panel (changeable in Options; there are also Help / Language buttons at the top of the panel).",
                     "Drag the panel by its top-left; wheel over the top-right to zoom.",
-                    "List below for viewing/sorting - switch views: Hierarchy / All districts / City / District / Town / Village.",
+                    "List below for viewing/sorting - switch views: Hierarchy / Group / All districts / City / District / Town / Village / Custom.",
                     "[Assign levels]",
                     "First select the \"Hierarchy\" view.",
                     "1. (Optional) Click a district in the assigned list first, then follow the steps below to attach new districts under the selected one.",
@@ -360,12 +357,13 @@ namespace DistrictFinanceManager
                     "Select an assigned district and click the \"Remove\" button: it will be removed from the hierarchy along with all its subordinates (the district itself stays in the game).",
                     "[Groups]",
                     "The Group view lets you group any districts and name them. A group only sums its members' own values and never affects the hierarchy; created groups auto-sort.",
+                    "[Custom government investment] The \"Custom\" view lets you enter an amount per district: click a district in the list, type a number above, pick a unit (k / m / b, default k), then Apply - the amount is ADDED to that district (append repeatedly; a negative number deducts). Values are saved per save file, scale with the Realistic data mode, and reuse the Building value delta colour tiers. It is also selectable from \"More\" in other views (flat lists use the own value; hierarchy / groups / per-level rankings use the aggregate).",
                     "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data. Showing 0 right after loading a save or enabling the mod is normal."
                 }
                 : new string[] {
                     "【快捷键】按 F9 开关本面板（快捷键可在「选项」里修改；面板顶部也有「说明 / 语言」按钮）。",
                     "左上角拖动面板；右上角滚轮缩放面板。",
-                    "下方列表用于查看与排序——用 层级/所有区划/市/区县/乡镇/村社区 切换视图。",
+                    "下方列表用于查看与排序——用 层级/组合/所有区划/市/区县/乡镇/村社区/自定义 切换视图。",
                     "【层级分配】",
                     "请先选择「层级」视图。",
                     "1.（可选）已加入的区划列表中点击某个区划再执行下面步骤，即可挂到当前选中区划下。",
@@ -376,6 +374,7 @@ namespace DistrictFinanceManager
                     "选中一个已分配的区划，点「移除」按钮，会将其连同所有下辖一起从层级树中移除（区划本身仍保留在游戏中）。",
                     "【组合】",
                     "组合视图可把任意区划组合成组并命名；组合只统计各成员自身值合计，不影响层级。创建后自动排序。",
+                    "【自定义政府投资额】「自定义」视图可手动给各区划录入一笔投资额：点列表里的区划，在上方输入数字、选单位（k / m / b，默认 k）、点确定即**累加到该区划**（可连续追加；输入负数表示冲减）。数值按存档保存，显示随「现实化数据」模式换算，配色复用「建筑价值增量」的分档。也可在其它视图的「更多 ▾」里选它排序（平铺列表用自身值，层级树/组合/单级排名用聚合值）。",
                     "【统计耗时】建成区面积、建筑价值增量、人均可支配等需要遍历全城建筑的统计项，约 30 秒后才有数据；刚读取存档或刚启用模组时显示为 0 属正常。"
                 };
 
@@ -497,7 +496,7 @@ namespace DistrictFinanceManager
                 Loc.T("缩放 ", "Zoom ") + string.Format("{0:P0}", _scale), zoomRight);
 
             // 顶部正中：操作说明按钮
-            if (GUI.Button(new Rect(PW / 2f - 40, y + 1, 80, TITLE_H - 2), Loc.T("说明", "Help"), _helpVis ? _bn2 : _btn))
+            if (GUI.Button(new Rect(PW / 2f - 40, y + 1, 80, TITLE_H - 2), Loc.T("说明", "Help"), _btn))
                 _helpVis = !_helpVis;
 
             // 顶部：语言切换（在「说明」右边）。点一下即切换并写入设置，选项窗口里也会同步显示。
@@ -637,9 +636,8 @@ namespace DistrictFinanceManager
             float bw = 72f;
             for (int lv = DistLevel.REGION; lv <= DistLevel.VILLAGE; lv++)
             {
-                bool on = _addLevel == lv;
                 string lb = LevelName(lv);
-                if (GUI.Button(new Rect(bx, y, bw, BTN_H), lb, on ? _bn2 : _btn))
+                if (GUI.Button(new Rect(bx, y, bw, BTN_H), lb, _btn))
                     _addLevel = lv;
                 bx += bw + 5;
             }
@@ -653,7 +651,15 @@ namespace DistrictFinanceManager
             y += BTN_H + GAP;
 
             // ==== 颜色图例（按排序依据切换；默认 GDP）====
-            if (_sortKey == 1)
+            // 「自定义」视图优先判断：它固定复用「建筑价值增量」的档位，与 _sortKey 无关
+            if (_viewMode == VIEW_INVEST)
+            {
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 自定义政府投资额（" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "年" : "周") + "）",
+                          "Legend · Custom gov. investment (" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "yr" : "wk") + ")"),
+                    GetBuiltDeltaDisplayTiers());
+            }
+            else if (_sortKey == 1)
             {
                 y = DrawLegend(PAD, y, PW - PAD * 2,
                     Loc.T("颜色图例 · 人口（人）", "Legend · Population"), POP_TIERS);
@@ -702,6 +708,14 @@ namespace DistrictFinanceManager
                 y = DrawLegend(PAD, y, PW - PAD * 2,
                     Loc.T("颜色图例 · 人均可支配（" + CurrencySymbol() + "/人）", "Legend · Disposable income/cap (" + CurrencySymbol() + "/person)"), GetDisplayIncomeTiers());
             }
+            else if (_sortKey == 10)
+            {
+                // 自定义政府投资额：与「建筑价值增量」复用同一张档位（_viewMode == VIEW_INVEST 分支上面已先拦）
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 自定义政府投资额（" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "年" : "周") + "）",
+                          "Legend · Custom gov. investment (" + CurrencySymbol() + "/" + (IsYearlyPeriod() ? "yr" : "wk") + ")"),
+                    GetBuiltDeltaDisplayTiers());
+            }
             else
             {
                 y = DrawLegend(PAD, y, PW - PAD * 2,
@@ -711,27 +725,29 @@ namespace DistrictFinanceManager
 
             // ==== 视图按钮 ====
             string[] viewLabels = Loc.IsEn
-                ? new string[] { "Tree", "Group", "All dist", "City", "District", "Town", "Village" }
-                : new string[] { "层级", "组合", "所有区划", "市", "区县", "乡镇", "村社区" };
+                ? new string[] { "Tree", "Group", "All dist", "City", "District", "Town", "Village", "Custom" }
+                : new string[] { "层级", "组合", "所有区划", "市", "区县", "乡镇", "村社区", "自定义" };
 
-            // 第 1 排：层级 / 组合 / 筛选（固定宽度）
+            // 第 1 排：层级 / 组合 / 筛选 / 自定义（固定宽度）
             float r1 = PAD;
-            if (GUI.Button(new Rect(r1, y, 70, BTN_H), viewLabels[0], _viewMode == 0 ? _bn2 : _btn)) _viewMode = 0;
-            if (GUI.Button(new Rect(r1 + 74, y, 70, BTN_H), viewLabels[1], _viewMode == 1 ? _bn2 : _btn)) _viewMode = 1;
+            if (GUI.Button(new Rect(r1, y, 70, BTN_H), viewLabels[0], _btn)) _viewMode = 0;
+            if (GUI.Button(new Rect(r1 + 74, y, 70, BTN_H), viewLabels[1], _btn)) _viewMode = 1;
             bool groupSel = _detailGroup >= 0 && _detailGroup < Groups.Count;
             if (GUI.Button(new Rect(r1 + 148, y, 130, BTN_H),
                 groupSel ? Loc.T("筛选:组合成员", "Filter: group members")
-                         : Loc.T("筛选:选中下辖", "Filter: subtree"), _filterSubtree ? _bn2 : _btn))
+                         : Loc.T("筛选:选中下辖", "Filter: subtree"), _btn))
                 _filterSubtree = !_filterSubtree;
+            // 「自定义」追加在筛选之后 —— 上面三个按钮的位置一个都没动
+            if (GUI.Button(new Rect(r1 + 286, y, 70, BTN_H), viewLabels[7], _btn))
+                _viewMode = VIEW_INVEST;
             y += BTN_H + GAP;
 
             // 第 2 排：所有区划 / 市 / 区县 / 乡镇 / 村社区
             float cw2 = (PW - PAD * 2 - 16) / 5f;
             float r2 = PAD;
-            for (int i = 2; i < viewLabels.Length; i++)
+            for (int i = 2; i < 7; i++)
             {
-                bool on = _viewMode == i;
-                if (GUI.Button(new Rect(r2, y, cw2, BTN_H), viewLabels[i], on ? _bn2 : _btn))
+                if (GUI.Button(new Rect(r2, y, cw2, BTN_H), viewLabels[i], _btn))
                     _viewMode = i;
                 r2 += cw2 + 4;
             }
@@ -741,24 +757,35 @@ namespace DistrictFinanceManager
             string[] sortLabels = Loc.IsEn
                 ? new string[] { "GDP", "Pop", "GDP/cap", "Land", "GDP/m²", "Pop/m²" }
                 : new string[] { "GDP", "人口", "人均GDP", "地价", "地均GDP", "人口密度" };
-            GUI.Label(new Rect(PAD, y, 60, BTN_H), Loc.T("排序:", "Sort: "), _fl);
-            float sx = PAD + 60;
-            for (int i = 0; i < sortLabels.Length; i++)
+            if (_viewMode == VIEW_INVEST)
             {
-                bool on = _sortKey == i;
-                if (GUI.Button(new Rect(sx, y, 66, BTN_H), sortLabels[i], on ? _bn2 : _btn))
-                    _sortKey = i;
-                sx += 70;
+                // 本视图固定按「自定义政府投资额」排序，这一排只画这一个键
+                GUI.Label(new Rect(PAD, y, 60, BTN_H), Loc.T("排序:", "Sort: "), _fl);
+                if (GUI.Button(new Rect(PAD + 60, y, 200, BTN_H),
+                    Loc.T("自定义政府投资额", "Custom gov. investment"), _btn))
+                    _sortKey = 10;   // 点它即选中该排序键（与其他视图的排序键按钮同义）
+                _moreBtnX = PAD + 264; _moreBtnY = y;
+                _moreSortOpen = false;   // 本视图没有「更多 ▾」下拉
             }
-            // 更多排序：下拉浮在列表上方（最后绘制），此处只放按钮、不占位
-            _moreBtnX = sx;
-            _moreBtnY = y;
-            if (GUI.Button(new Rect(sx, y, 54, BTN_H),
-                Loc.T("更多 ▾", "More ▾"), _sortKey >= 6 ? _bn2 : _btn))
+            else
             {
-                _moreSortOpen = !_moreSortOpen;
-                if (_hub != null && _hub.Settings != null && _hub.Settings.ShowDebug)
-                    Debug.Log("[DFM] moreSort toggle open=" + _moreSortOpen + " key=" + _sortKey);
+                GUI.Label(new Rect(PAD, y, 60, BTN_H), Loc.T("排序:", "Sort: "), _fl);
+                float sx = PAD + 60;
+                for (int i = 0; i < sortLabels.Length; i++)
+                {
+                    if (GUI.Button(new Rect(sx, y, 66, BTN_H), sortLabels[i], _btn))
+                        _sortKey = i;
+                    sx += 70;
+                }
+                // 更多排序：下拉浮在列表上方（最后绘制），此处只放按钮、不占位
+                _moreBtnX = sx;
+                _moreBtnY = y;
+                if (GUI.Button(new Rect(sx, y, 54, BTN_H), Loc.T("更多 ▾", "More ▾"), _btn))
+                {
+                    _moreSortOpen = !_moreSortOpen;
+                    if (_hub != null && _hub.Settings != null && _hub.Settings.ShowDebug)
+                        Debug.Log("[DFM] moreSort toggle open=" + _moreSortOpen + " key=" + _sortKey);
+                }
             }
             y += BTN_H + GAP;
 
@@ -776,6 +803,7 @@ namespace DistrictFinanceManager
                 case 4:
                 case 5:
                 case 6: DrawRankingList(list, _viewMode - 2); break;  // 市/区县/乡镇/村社区
+                case VIEW_INVEST: DrawInvestView(list); break;         // 自定义政府投资额
                 default: DrawTreeList(list); break;                    // 层级
             }
 
@@ -791,8 +819,8 @@ namespace DistrictFinanceManager
         private void DrawMoreSortDropdown()
         {
             if (!_moreSortOpen) return;
-            string[] more = Loc.IsEn ? new string[] { "Area", "Building value Δ", "Built-up area", "Disposable/cap" } : new string[] { "面积", "建筑价值增量", "建成区面积", "人均可支配" };
-            int[] moreKeys = new int[] { 6, 7, 8, 9 }; // 追加更多排序项在此（两个数组必须等长同序）
+            string[] more = Loc.IsEn ? new string[] { "Area", "Building value Δ", "Built-up area", "Disposable/cap", "Gov. investment" } : new string[] { "面积", "建筑价值增量", "建成区面积", "人均可支配", "自定义政府投资额" };
+            int[] moreKeys = new int[] { 6, 7, 8, 9, 10 }; // 追加更多排序项在此（两个数组必须等长同序）
             Color oldBg = GUI.backgroundColor;
             GUI.backgroundColor = Color.black; // 展开的下拉窗口背景纯黑
             float dy = _moreBtnY + BTN_H + GAP;
@@ -908,13 +936,11 @@ namespace DistrictFinanceManager
             bool ex = _ex.ContainsKey(id) && _ex[id];
             string prefix = has ? (ex ? "▼ " : "▶ ") : "  ";
 
-            bool selected = id == _hub.SelectedID;
             Color old = GUI.color;
-            if (!selected)
-                GUI.color = SortColor(_sortKey, aggVal[id]);
-            GUIStyle st = selected ? _ts : _rankBtn;
+            // 选中行也照样热力着色 —— 选中只用 ▶ 前缀标识（2026-09-19 去掉选中态高亮）
+            GUI.color = SortColor(_sortKey, aggVal[id]);
             Rect row = new Rect(ind, y, w - ind, NODE_H);
-            if (GUI.Button(row, prefix + tag + name, st))
+            if (GUI.Button(row, prefix + tag + name, _rankBtn))
             {
                 SelectDistrict(id);
                 if (has) { _ex[id] = !ex; }
@@ -999,23 +1025,27 @@ namespace DistrictFinanceManager
             double[] delta = _hub.Calculator.GetAggregateBuiltValueDelta();
             double[] built = _hub.Calculator.GetAggregateBuiltArea();
             double[] income = IncomeToDisplay(_hub.Calculator.GetAggregateDisposableIncome());
+            // 层级树是层级型视图 → 自定义投资额用**聚合**值（自身 + 全部下辖）
+            double[] invest = InvestToDisplay(GetAggregateInvest());
             double[] v = new double[256];
             for (int i = 1; i < 256; i++)
-                v[i] = SortValue(_sortKey, (ushort)i, gdp, pop, land, m2, delta, built, income);
+                v[i] = SortValue(_sortKey, (ushort)i, gdp, pop, land, m2, delta, built, income, invest);
             return v;
         }
 
         /// <summary>是否通过筛选：开启筛选时——若选中组合则只保留该组合成员；
-        /// 若选中区划则保留其层级下辖及祖先链；两者都无则全通过。</summary>
+        /// 若选中区划则保留**该区划自身 + 其层级下辖**；两者都无则全通过。
+        /// ⚠️ 2026-09-19：**不再保留祖先链**（原先会把选中节点的父/祖父节点也带进来）。</summary>
         private bool PassFilter(ushort did)
         {
             if (!_filterSubtree) return true;
             if (_detailGroup >= 0 && _detailGroup < Groups.Count)
                 return Groups[_detailGroup].Members.Contains(did); // 按组合成员过滤
             if (_hub.SelectedID == 0) return true;
-            if (did == _hub.SelectedID) return true; // 包含父节点自身
-            // 保留选中节点的祖先链（上级直辖条目，如按X市筛选后区县排名里保留X市直辖）
-            if (_hub.Hierarchy.IsDescendantOf(_hub.SelectedID, did)) return true;
+            if (did == _hub.SelectedID) return true; // 保留选中节点自身
+            // 只保留下辖。原先这里还有一条
+            //   if (IsDescendantOf(SelectedID, did)) return true;   // ← 祖先链，已删
+            // 会把「本身的父节点与祖父节点」也放进榜单。
             return _hub.Hierarchy.IsDescendantOf(did, _hub.SelectedID);
         }
 
@@ -1032,7 +1062,7 @@ namespace DistrictFinanceManager
             return m2;
         }
 
-        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null, double[] delta = null, double[] built = null, double[] income = null)
+        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null, double[] delta = null, double[] built = null, double[] income = null, double[] invest = null)
         {
             switch (key)
             {
@@ -1046,6 +1076,9 @@ namespace DistrictFinanceManager
                 case 7: return delta != null ? delta[did] : 0.0; // 建筑价值增量
                 case 8: return built != null ? built[did] : 0.0; // 建成区面积（m²）
                 case 9: return income != null ? income[did] : 0.0; // 人均可支配收入
+                // 自定义政府投资额：调用方决定传**自身**还是**聚合**
+                // （约定：平铺「所有区划」列表传自身，层级树/单级排名/组合传聚合）
+                case 10: return invest != null ? invest[did] : 0.0;
                 default: return gdp[did];
             }
         }
@@ -1069,6 +1102,12 @@ namespace DistrictFinanceManager
                     }
                 case 8: return AreaKm2(value) + Loc.T(" km²", " km²"); // 建成区面积
                 case 9: return cur + F(value) + Loc.T("/人", "/cap"); // 人均可支配收入
+                case 10: // 自定义政府投资额（带符号，可能是负数——冲减后；微小值归零避免 -0.00）
+                    {
+                        double v = System.Math.Abs(value) < 0.5 ? 0.0 : value;
+                        string sign = v > 0 ? "+" : (v < 0 ? "-" : "");
+                        return sign + cur + F(System.Math.Abs(v));
+                    }
                 default: return cur + F((long)value);
             }
         }
@@ -1084,6 +1123,7 @@ namespace DistrictFinanceManager
             if (key == 7) return BuiltDeltaColor(value);   // 建筑价值增量：以 0 为中心的对称分档
             if (key == 8) return BuiltAreaColor(value);    // 建成区面积：km² 分级，阈值=区域面积档位减半
             if (key == 9) return IncomePerCapitaColor(value); // 人均可支配收入
+            if (key == 10) return BuiltDeltaColor(value);     // 自定义政府投资额：复用建筑价值增量的配色
             return GdpColor(value);
         }
 
@@ -1100,6 +1140,7 @@ namespace DistrictFinanceManager
                 case 7: return Loc.T("建筑价值增量", "Building value Δ");
                 case 8: return Loc.T("建成区面积", "Built-up area");
                 case 9: return Loc.T("人均可支配", "Disposable/capita");
+                case 10: return Loc.T("自定义政府投资额", "Custom gov. investment");
                 default: return "GDP";
             }
         }
@@ -1123,6 +1164,8 @@ namespace DistrictFinanceManager
             double[] delta = _hub.Calculator.GetDistrictBuiltValueDelta();
             double[] builtS = _hub.Calculator.GetDistrictBuiltArea();
             double[] incomeD = IncomeToDisplay(_hub.Calculator.GetDistrictDisposableIncome());
+            // 「所有区划」是平铺列表 → 自定义投资额用**自身**值（层级型视图才用聚合）
+            double[] investD = InvestToDisplay(GetInvestSelf());
             ushort[] all = _hub.GetVanillaDistricts();
 
             var items = new List<KeyValuePair<ushort, double>>();
@@ -1130,7 +1173,7 @@ namespace DistrictFinanceManager
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2, delta, builtS, incomeD)));
+                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2, delta, builtS, incomeD, investD)));
             }
             items.Sort((a, b) => b.Value.CompareTo(a.Value)); // 降序
 
@@ -1192,13 +1235,16 @@ namespace DistrictFinanceManager
             double[] selfBuiltS = _hub.Calculator.GetDistrictBuiltArea();
             double[] aggIncomeD = IncomeToDisplay(_hub.Calculator.GetAggregateDisposableIncome());
             double[] selfIncomeD = IncomeToDisplay(_hub.Calculator.GetDistrictDisposableIncome());
+            // 单级排名是层级型视图 → 本列表用**聚合**；「直辖」附加条目与其它指标一样用**自身**
+            double[] aggInvestD = InvestToDisplay(GetAggregateInvest());
+            double[] selfInvestD = InvestToDisplay(GetInvestSelf());
 
             var items = new List<RankEntry>();
             foreach (ushort did in _hub.Hierarchy.GetDistrictsByLevel(level))
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2, aggDelta, aggBuiltS, aggIncomeD), parentLevel = false });
+                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2, aggDelta, aggBuiltS, aggIncomeD, aggInvestD), parentLevel = false });
             }
 
             // 加入上一级节点（直辖）：数值用其自身，不聚合
@@ -1210,7 +1256,7 @@ namespace DistrictFinanceManager
                 {
                     if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                     if (!PassFilter(did)) continue;
-                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2, selfDelta, selfBuiltS, selfIncomeD), parentLevel = true });
+                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2, selfDelta, selfBuiltS, selfIncomeD, selfInvestD), parentLevel = true });
                 }
             }
 
@@ -1270,6 +1316,9 @@ namespace DistrictFinanceManager
             double[] deltaRaw = _hub.Calculator.GetDistrictBuiltValueDelta();
             double[] builtRaw = _hub.Calculator.GetDistrictBuiltArea();
             double[] incomeRaw = IncomeToDisplay(_hub.Calculator.GetDistrictDisposableIncome());
+            // 自定义政府投资额：与组合里**其它所有指标**同口径 —— 都是「成员**自身**值合计」，
+            // 不做层级聚合（本视图的标题与说明也是这么写的，且避免父子同组时重复计入）
+            double[] investRaw = InvestToDisplay(GetInvestSelf());
             ushort[] all = _hub.GetVanillaDistricts();
             float lw = list.width - 20;
             float x0 = list.x;
@@ -1318,7 +1367,7 @@ namespace DistrictFinanceManager
             long totalPop = TotalPop(pop);
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
-            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw)));
+            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw)));
 
             int toDelete = -1;
             for (int r = 0; r < order.Count; r++)
@@ -1326,7 +1375,7 @@ namespace DistrictFinanceManager
                 int gi = order[r];
                 GroupData g = Groups[gi];
                 bool active = gi == _activeGroupIdx;
-                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw);
+                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw);
                 string share = "";
                 if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(GroupGdp(gi, gdp), totalGdp);
                 else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(GroupPop(gi, pop), totalPop);
@@ -1335,8 +1384,9 @@ namespace DistrictFinanceManager
                     + "  " + Loc.T("成员", "mem") + g.Members.Count;
                 Rect rowRect = new Rect(x0, cy, lw - 146, NODE_H);
                 Color old = GUI.color;
-                if (!active) GUI.color = SortColor(_sortKey, gval);
-                if (GUI.Button(rowRect, line, active ? _ts : _rankBtn))
+                // 选中行也照样热力着色 —— 选中只用 ▶ 前缀标识（2026-09-19 去掉选中态高亮）
+                GUI.color = SortColor(_sortKey, gval);
+                if (GUI.Button(rowRect, line, _rankBtn))
                 {
                     // 激活该组并切换成员展开状态（可逆）；同时顶部显示该组合合计
                     _activeGroupIdx = gi;
@@ -1387,7 +1437,7 @@ namespace DistrictFinanceManager
                         if (string.IsNullOrEmpty(nm)) continue;
                         bool inG = ag.Members.Contains(did);
                         string lb = (inG ? "☑ " : "☐ ") + nm;
-                        if (GUI.Button(new Rect(0, mcy, lw, NODE_H), lb, inG ? _ts : _rankBtn))
+                        if (GUI.Button(new Rect(0, mcy, lw, NODE_H), lb, _rankBtn))
                         {
                             if (inG) ag.Members.Remove(did); else ag.Members.Add(did);
                             if (_hub != null) _hub.MarkDirty();
@@ -1403,6 +1453,223 @@ namespace DistrictFinanceManager
                 }
                 GUI.EndScrollView();
             }
+        }
+
+        // ================== 「自定义政府投资额」视图 ==================
+        // 本视图**自成一体**：不接入 _sortKey / SortValue / SortColor / GroupValue 那套全局排序系统，
+        // 自带排序、取色与格式化，只调用现有的只读工具（BuiltDeltaColor / F / CurrencySymbol / TrackImeCaret）。
+
+        /// <summary>
+        /// 显示系数。**刻意与「建筑价值增量」的档位用同一个系数**
+        /// （`LandMult() × (年化?52:1)`，见 GetBuiltDeltaDisplayTiers）：
+        /// 若改用 GetDisplayFactor()（2625/375）会与图例档位（420×52 / 60×52）不一致，数字和颜色对不上。
+        /// </summary>
+        private static double InvestMult()
+        {
+            return LandMult() * (IsYearlyPeriod() ? 52.0 : 1.0);
+        }
+
+        /// <summary>单位键倍率：0 = k(×1000，默认) / 1 = m(×1e6) / 2 = b(×1e9)。</summary>
+        private static double InvestUnitMult(int unit)
+        {
+            if (unit == 1) return 1000000.0;
+            if (unit == 2) return 1000000000.0;
+            return 1000.0;
+        }
+
+        /// <summary>
+        /// 把输入串解析成数值（全项目唯一的 string→数值解析器；F() 是反方向）。
+        /// 忽略空格与千分位逗号；允许前导负号（用于**冲减**已录入的额）；
+        /// 可选后缀 k/m/b（大小写不敏感）会**覆盖**当前单位档，兼容直接打 "1.5k"。
+        /// 遇到其它字符或不含数字则返回 false。
+        /// </summary>
+        private static bool ParseKmb(string s, double unitMult, out double value)
+        {
+            value = 0.0;
+            if (string.IsNullOrEmpty(s)) return false;
+            double mult = unitMult;
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == ' ' || c == '\t' || c == ',') continue;
+                if ((c >= '0' && c <= '9') || c == '.' || c == '-') { sb.Append(c); continue; }
+                if (c == 'k' || c == 'K') { mult = 1000.0; continue; }
+                if (c == 'm' || c == 'M') { mult = 1000000.0; continue; }
+                if (c == 'b' || c == 'B') { mult = 1000000000.0; continue; }
+                return false;
+            }
+            if (sb.Length == 0) return false;
+            double v;
+            if (!double.TryParse(sb.ToString(), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out v)) return false;
+            value = v * mult;
+            return true;
+        }
+
+        /// <summary>各区划**自身**的投资额原始值（未乘显示系数）。</summary>
+        private double[] GetInvestSelf()
+        {
+            double[] r = new double[256];
+            if (_hub != null && _hub.Investments != null)
+            {
+                foreach (KeyValuePair<ushort, double> kv in _hub.Investments)
+                    if (kv.Key < 256) r[kv.Key] = kv.Value;
+            }
+            return r;
+        }
+
+        /// <summary>原始值 → 显示值（仿 IncomeToDisplay 的 f==1 免分配写法）。</summary>
+        private double[] InvestToDisplay(double[] raw)
+        {
+            double f = InvestMult();
+            if (f == 1.0) return raw;
+            double[] r = new double[raw.Length];
+            for (int i = 0; i < raw.Length; i++) r[i] = raw[i] * f;
+            return r;
+        }
+
+        /// <summary>
+        /// 各区划的**聚合**投资额（自身 + 全部下辖，递归）。照抄
+        /// Calculator.AccumArea(DistrictFinanceCalculator.cs:314) 的后序累加 + visited 防环。
+        /// 注：按约定「平铺所有区划的列表用自身值，层级型视图用聚合值」——
+        /// 本视图是平铺列表，所以走 GetInvestSelf()；此函数备用（将来层级树/单级排名要用它就得改现有排序系统）。
+        /// </summary>
+        private double[] GetAggregateInvest()
+        {
+            double[] self = GetInvestSelf();
+            double[] agg = new double[256];
+            for (int i = 0; i < 256; i++) agg[i] = self[i];
+            if (_hub == null || _hub.Hierarchy == null) return agg;
+            double[] sum = new double[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in _hub.Hierarchy.GetRootNodes())
+                AccumInvest(root, self, sum, _hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited)) agg[id] = sum[id];
+            return agg;
+        }
+
+        private static void AccumInvest(ushort d, double[] self, double[] sum,
+            DistrictHierarchy h, HashSet<ushort> visited)
+        {
+            if (!visited.Add(d)) return;   // 防环（层级成环会递归死循环）
+            double s = self[d];
+            foreach (ushort child in h.GetChildren(d))
+            {
+                AccumInvest(child, self, sum, h, visited);
+                s += sum[child];
+            }
+            sum[d] = s;
+        }
+
+        /// <summary>「自定义政府投资额」视图：上方输入行 + 下方所有区划列表（按自身累计额降序）。</summary>
+        private void DrawInvestView(Rect list)
+        {
+            ushort[] all = _hub.GetVanillaDistricts();
+            double[] self = GetInvestSelf();
+            double[] disp = InvestToDisplay(self);
+
+            float lw = list.width - 20;
+            float x0 = list.x;
+            float cy = list.y;
+
+            // 编辑目标若已被删掉 → 自动清空
+            if (_investEditTarget != 0 && string.IsNullOrEmpty(_hub.GetVanillaDistrictName(_investEditTarget)))
+                _investEditTarget = 0;
+
+            GUI.Label(new Rect(x0, cy, lw, HEADER_H),
+                Loc.T("— 自定义政府投资额（点击下方区划输入，按累计额降序，可输入负数）—",
+                      "— Custom government investment (click a district to enter, sorted desc, negatives allowed) —"), _hdr);
+            cy += HEADER_H + GAP;
+
+            // ---- 输入行：左 Label + 输入框 + [k][m][b] + [确定]（仿组合命名行的横排）----
+            GUI.Label(new Rect(x0, cy, 66, BTN_H), Loc.T("投资额:", "Amount:"), _fl);
+            float bx = x0 + lw;
+            Rect okBtn = new Rect(bx - 78, cy, 78, BTN_H); bx -= 78 + 6;
+            Rect bBtn = new Rect(bx - 32, cy, 32, BTN_H); bx -= 32 + 3;
+            Rect mBtn = new Rect(bx - 32, cy, 32, BTN_H); bx -= 32 + 3;
+            Rect kBtn = new Rect(bx - 32, cy, 32, BTN_H); bx -= 32 + 8;
+            Rect fld = new Rect(x0 + 70, cy, System.Math.Max(60f, bx - (x0 + 70)), BTN_H);
+
+            GUI.SetNextControlName("DFMInvestField");
+            _investInput = GUI.TextField(fld, _investInput, 20);
+            bool focused = GUI.GetNameOfFocusedControl() == "DFMInvestField";
+            if (focused) TrackImeCaret(fld, _investInput);   // 中文输入法候选窗跟随
+
+            if (GUI.Button(kBtn, "k", _btn)) _investUnit = 0;
+            if (GUI.Button(mBtn, "m", _btn)) _investUnit = 1;
+            if (GUI.Button(bBtn, "b", _btn)) _investUnit = 2;
+
+            bool confirm = GUI.Button(okBtn, Loc.T("确定", "Apply"), _btn);
+            if (focused && Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter))
+                confirm = true;
+
+            if (confirm && _investEditTarget != 0 && _hub.Investments != null)
+            {
+                double amt;
+                if (ParseKmb(_investInput, InvestUnitMult(_investUnit), out amt))
+                {
+                    double f = InvestMult();
+                    double raw = (f != 0.0) ? amt / f : amt;   // 输入的显示值 → 换回原始值存起来
+                    double cur;
+                    _hub.Investments.TryGetValue(_investEditTarget, out cur);
+                    _hub.Investments[_investEditTarget] = cur + raw;   // 累加（负数为冲减）
+                    _hub.MarkDirty();
+                    _investInput = "";   // 清空，便于连续追加
+                    GUI.FocusControl("");
+                }
+            }
+            cy += BTN_H + 2;
+
+            // 目标行：当前编辑哪个区划 + 它当前累计了多少（**不预填到输入框**：确认是「累加」，
+            // 预填再确认会翻倍）
+            string curTxt = "";
+            if (_investEditTarget != 0 && _investEditTarget < 256)
+                curTxt = CurrencySymbol() + F(disp[_investEditTarget]);
+            GUI.Label(new Rect(x0, cy, lw, TEXT_H),
+                _investEditTarget == 0
+                    ? Loc.T("目标：未选择 —— 点下方任一区划开始输入（负数表示冲减）",
+                            "Target: none - click a district below (negative = deduct)")
+                    : Loc.T("目标：", "Target: ") + _hub.GetVanillaDistrictName(_investEditTarget)
+                      + Loc.T("    当前累计：", "    current: ") + curTxt
+                      + Loc.T("    单位：", "    unit: ") + (_investUnit == 0 ? "k" : (_investUnit == 1 ? "m" : "b")),
+                _fl);
+            cy += TEXT_H + GAP;
+
+            // ---- 列表：所有区划，按自身累计额降序 ----
+            var items = new List<KeyValuePair<ushort, double>>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                ushort did = all[i];
+                if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
+                if (!PassFilter(did)) continue;
+                items.Add(new KeyValuePair<ushort, double>(did, disp[did]));
+            }
+            items.Sort((a, b) => b.Value.CompareTo(a.Value));   // 降序（Comparison 委托可用，非 Func）
+
+            Rect listRect = new Rect(x0, cy, lw, System.Math.Max(60f, list.yMax - cy));
+            float contentH = HEADER_H + items.Count * NODE_H + 24f;
+            _sortScroll = GUI.BeginScrollView(listRect, _sortScroll, new Rect(0, 0, lw, contentH));
+            float scy = DrawHeader(0, lw,
+                Loc.T("— 各区划 自定义政府投资额 排名（降序，点击输入）—",
+                      "— Districts by custom investment (desc, click to edit) —"));
+            for (int i = 0; i < items.Count; i++)
+            {
+                ushort did = items[i].Key;
+                bool editing = did == _investEditTarget;
+                string line = (editing ? "▶ " : "  ") + string.Format("{0}. {1}    {2}",
+                    i + 1, _hub.GetVanillaDistrictName(did), CurrencySymbol() + F(items[i].Value));
+                Color old = GUI.color;
+                GUI.color = BuiltDeltaColor(items[i].Value);   // 复用「建筑价值增量」的配色
+                if (GUI.Button(new Rect(0, scy + i * NODE_H, lw, NODE_H), line, _rankBtn))
+                {
+                    _investEditTarget = did;
+                    SelectDistrict(did);
+                }
+                GUI.color = old;
+            }
+            GUI.EndScrollView();
         }
 
         /// <summary>弹窗输入框聚焦时，手动转发键盘字符到 UITextField（绕过 IMGUI 键盘焦点限制）。</summary>
@@ -1613,7 +1880,7 @@ namespace DistrictFinanceManager
 
         /// <summary>组合的统计值（按排序依据）：GDP/人口为成员求和，人均=和/和；
         /// 地价为成员面积加权平均地价再随模式换算显示（避免把地价当 GDP 求和导致异常高）。</summary>
-        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, double[] areaRaw, double[] delta, double[] built, double[] income)
+        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, double[] areaRaw, double[] delta, double[] built, double[] income, double[] invest)
         {
             GroupData g = Groups[idx];
 
@@ -1632,7 +1899,7 @@ namespace DistrictFinanceManager
                 return asum > 0 ? (lsum / asum) * LandMult() : 0;
             }
 
-            double sg = 0, sp = 0, sa = 0, sd = 0, sb = 0, si = 0;
+            double sg = 0, sp = 0, sa = 0, sd = 0, sb = 0, si = 0, sv = 0;
             foreach (ushort m in g.Members)
             {
                 sg += gdp[m];
@@ -1643,6 +1910,9 @@ namespace DistrictFinanceManager
                 // 人均可支配：si 累加的是**分子**（人口×人均），最后再除总人口 —— 与
                 // 计算器的「聚合分子 ÷ 聚合人口」口径一致，不能对成员人均值求平均
                 if (income != null && m < income.Length) si += pop[m] * income[m];
+                // 自定义政府投资额：与其它指标同口径 = 成员**自身**值合计（调用方传的是自身数组），
+                // 不做层级聚合，所以父子同组也不会重复计入
+                if (invest != null && m < invest.Length) sv += invest[m];
             }
             switch (_sortKey)
             {
@@ -1654,6 +1924,7 @@ namespace DistrictFinanceManager
                 case 7: return sd; // 建筑价值增量合计
                 case 8: return sb; // 建成区面积合计
                 case 9: return sp > 0 ? si / sp : 0; // 人均可支配 = Σ分子 / Σ人口
+                case 10: return sv; // 自定义政府投资额合计
                 default: return sg;
             }
         }
@@ -2217,7 +2488,6 @@ namespace DistrictFinanceManager
             _legend = MakeLabel(9, FontStyle.Normal, new Color(0.72f, 0.72f, 0.78f));
 
             _nodeBtn = MakeRowStyle(13, new Color(0.82f, 0.82f, 0.88f));
-            _ts = MakeRowStyle(13, new Color(0.7f, 0.85f, 1f));
             _rankBtn = MakeRowStyle(13, Color.white); // 白色文字，用于排名行按 GDP 着色
 
             _btn = MakeButtonStyle(12, Color.white);
@@ -2225,8 +2495,9 @@ namespace DistrictFinanceManager
             _btnWrap.wordWrap = true;
             _btnWrap.alignment = TextAnchor.MiddleCenter;
             _shield = new GUIStyle(); // 透明遮罩：吞掉落不到下拉条目上的点击，避免点穿到列表行
-            _bn2 = MakeButtonStyle(12, Color.yellow);
-            _bn2.normal.background = Tex(new Color(0.25f, 0.5f, 0.25f));
+            // 注：2026-09-19 去掉了「选中态高亮」——原 `_ts`（选中行浅蓝字）与 `_bn2`
+            //     （当前视图/排序键的绿底黄字）已删除，所有按钮统一用 `_btn`、
+            //     所有列表行统一用 `_rankBtn`，选中项只靠 `▶` 前缀辨认。
 
             _styled = true;
         }

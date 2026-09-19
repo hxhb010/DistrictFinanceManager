@@ -15,8 +15,6 @@ namespace DistrictFinanceManager
         public bool ShowFinanceBreakdown = true;
         public string PanelKey = "F9";
         public string Language = "zh"; // "zh" = 中文, "en" = English
-        public float ResidentWeight = 0.5f; // 居民权重 0~1
-        public float WorkerWeight = 3f;     // 工人权重 0~5
         public int DisplayMode = 0; // 0 原版按周(GDP×1) 1 原版按年(GDP×52) 2 人民币年化(GDP×2625/地价×420) 3 美元年化(GDP×375/地价×60)
         public bool IncludeDirect = false; // 排名是否包含直辖区划（默认关闭）
         public bool ShowDebug = false; // 区域信息下方显示调试文本
@@ -70,8 +68,6 @@ namespace DistrictFinanceManager
                         case "ShowFinanceBreakdown": s.ShowFinanceBreakdown = ParseBool(v, true); break;
                         case "PanelKey": s.PanelKey = v; break;
                         case "Language": s.Language = v; break;
-                        case "ResidentWeight": s.ResidentWeight = ParseFloat(v, 0.5f); break;
-                        case "WorkerWeight": s.WorkerWeight = ParseFloat(v, 3f); break;
                         case "DisplayMode": s.DisplayMode = ParseInt(v, 0); break;
                         case "IncludeDirect": s.IncludeDirect = ParseBool(v, false); break;
                         case "ShowDebug": s.ShowDebug = ParseBool(v, false); break;
@@ -102,8 +98,6 @@ namespace DistrictFinanceManager
                     w.WriteLine("ShowFinanceBreakdown=" + ShowFinanceBreakdown);
                     w.WriteLine("PanelKey=" + PanelKey);
                     w.WriteLine("Language=" + Language);
-                    w.WriteLine("ResidentWeight=" + ResidentWeight.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    w.WriteLine("WorkerWeight=" + WorkerWeight.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     w.WriteLine("DisplayMode=" + DisplayMode);
                     w.WriteLine("IncludeDirect=" + IncludeDirect);
                     w.WriteLine("ShowDebug=" + ShowDebug);

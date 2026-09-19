@@ -51,58 +51,6 @@ namespace DistrictFinanceManager
             catch (Exception ex) { Debug.LogError("[DFM] Save failed: " + ex.Message); }
         }
 
-        /// <summary>按存档保存居民/工人权重（独立于全局设置）。</summary>
-        public static void SaveWeights(float resWeight, float worWeight, string saveName)
-        {
-            try
-            {
-                string dir = GetDir();
-                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                string path = GetRatioPath(saveName);
-                using (StreamWriter w = new StreamWriter(path, false, System.Text.Encoding.UTF8))
-                {
-                    w.WriteLine("R " + resWeight.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    w.WriteLine("W " + worWeight.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                }
-                Debug.Log("[DFM] Weights saved: res=" + resWeight + " wor=" + worWeight + " -> " + path);
-            }
-            catch (Exception ex) { Debug.LogError("[DFM] Save weights failed: " + ex.Message); }
-        }
-
-        /// <summary>读取该存档的居民/工人权重；无则返回 false。</summary>
-        public static bool TryLoadWeights(string saveName, out float resWeight, out float worWeight)
-        {
-            resWeight = 0.5f;
-            worWeight = 3f;
-            try
-            {
-                string path = GetRatioPath(saveName);
-                if (!File.Exists(path)) return false;
-                foreach (string line in File.ReadAllLines(path))
-                {
-                    string t = line.Trim();
-                    if (string.IsNullOrEmpty(t)) continue;
-                    string[] parts = t.Split(' ');
-                    if (parts.Length != 2) continue;
-                    float v;
-                    if (!float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
-                    if (parts[0] == "R") resWeight = v;
-                    else if (parts[0] == "W") worWeight = v;
-                }
-                return true;
-            }
-            catch (Exception ex) { Debug.LogWarning("[DFM] Load weights failed: " + ex.Message); }
-            return false;
-        }
-
-        private static string GetRatioPath(string saveName)
-        {
-            string safe = saveName;
-            foreach (char c in Path.GetInvalidFileNameChars()) safe = safe.Replace(c, '_');
-            return Path.Combine(GetDir(), safe + ".ratio");
-        }
-
         /// <summary>按存档保存组合（Groups）。</summary>
         public static void SaveGroups(List<GroupData> groups, string saveName)
         {
@@ -164,6 +112,60 @@ namespace DistrictFinanceManager
             string safe = saveName;
             foreach (char c in Path.GetInvalidFileNameChars()) safe = safe.Replace(c, '_');
             return Path.Combine(GetDir(), safe + ".grp");
+        }
+
+        /// <summary>按存档保存「自定义政府投资额」，每行 `D &lt;区划ID&gt; &lt;原始值&gt;`。</summary>
+        public static void SaveInvestments(Dictionary<ushort, double> investments, string saveName)
+        {
+            try
+            {
+                string dir = GetDir();
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                string path = GetInvestPath(saveName);
+                using (StreamWriter w = new StreamWriter(path, false, System.Text.Encoding.UTF8))
+                {
+                    foreach (KeyValuePair<ushort, double> kv in investments)
+                        w.WriteLine("D " + kv.Key + " " + kv.Value.ToString("0.###",
+                            System.Globalization.CultureInfo.InvariantCulture));
+                }
+                Debug.Log("[DFM] Investments saved: " + investments.Count + " -> " + path);
+            }
+            catch (Exception ex) { Debug.LogError("[DFM] Save investments failed: " + ex.Message); }
+        }
+
+        /// <summary>读取该存档的「自定义政府投资额」；无文件则返回空字典。坏行跳过，不抛。</summary>
+        public static Dictionary<ushort, double> LoadInvestments(string saveName)
+        {
+            var map = new Dictionary<ushort, double>();
+            try
+            {
+                string path = GetInvestPath(saveName);
+                if (!File.Exists(path)) return map;
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t[0] != 'D') continue;
+                    string[] parts = t.Split(new char[] { ' ', '\t' },
+                        StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 3) continue;
+                    ushort id;
+                    double v;
+                    if (!ushort.TryParse(parts[1], out id) || id == 0) continue;
+                    if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
+                    map[id] = v;
+                }
+                Debug.Log("[DFM] Investments loaded: " + map.Count);
+            }
+            catch (Exception ex) { Debug.LogWarning("[DFM] Load investments failed: " + ex.Message); }
+            return map;
+        }
+
+        private static string GetInvestPath(string saveName)
+        {
+            string safe = saveName;
+            foreach (char c in Path.GetInvalidFileNameChars()) safe = safe.Replace(c, '_');
+            return Path.Combine(GetDir(), safe + ".inv");
         }
 
         /// <summary>墓碑文件：记录「曾经存在、后来被删掉」的原版区划 ID。</summary>
