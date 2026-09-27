@@ -34,10 +34,13 @@ namespace DistrictFinanceManager
         public string SaveName { get; private set; }
         public System.Collections.Generic.List<GroupData> Groups = new System.Collections.Generic.List<GroupData>();
 
-        /// <summary>「自定义政府投资额」视图：区划 ID → 玩家录入的**原始值**（原版周化口径）。
-        /// 显示时才乘显示系数（见 Panel.InvestToDisplay）。按存档存 .inv。</summary>
-        public System.Collections.Generic.Dictionary<ushort, double> Investments =
-            new System.Collections.Generic.Dictionary<ushort, double>();
+        /// <summary>「自定义政府投资额」视图：区划 ID → 该区划**按周分期**的投资记录（见 InvestInstallment）。
+        /// 一笔录入按当前周期均摊成 N 份记在「当周起 N 周」上；统计时只累加最近 N 周内的分期，
+        /// 与「建筑价值增量」同口径。显示时才乘显示系数（见 Panel.InvestToDisplay）。按存档存 .inv。</summary>
+        public System.Collections.Generic.Dictionary<ushort,
+            System.Collections.Generic.List<InvestInstallment>> Investments =
+            new System.Collections.Generic.Dictionary<ushort,
+                System.Collections.Generic.List<InvestInstallment>>();
 
         public ushort SelectedID;
         public int EditingLevel = 1;
@@ -81,6 +84,7 @@ namespace DistrictFinanceManager
             Hierarchy = DistrictDataStore.Load(SaveName);
             Groups = DistrictDataStore.LoadGroups(SaveName);
             Investments = DistrictDataStore.LoadInvestments(SaveName);
+            PruneInvestments();   // 早于最长周期的分期永远进不了统计窗口，读档顺手裁掉
             // 失效区划的清理不在这里做：读档瞬间区划可能还没建出来，立即判断会误删整个层级。
             // 改由 Update 里的 TickPruneMissingDistricts() 延迟+二次确认后再清（见该方法注释）。
             _pruneGrace = PRUNE_GRACE;
@@ -258,6 +262,33 @@ namespace DistrictFinanceManager
             {
                 Debug.LogWarning("[DFM] TickDistrictMaintenance failed: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 裁掉**永远进不了统计窗口**的投资分期：早于「当前周 + 1 − 最长周期(260 周)」的那些，
+        /// 在任何周期下都算不出来了（窗口下界最多回溯 260 周），留着只会让 .inv 越写越长。
+        /// 某区划的分期被裁光 → 整条删掉（显示本来也是 0，与「清空」同效）。
+        ///
+        /// ⚠️ 只裁**过去**，绝不裁未来：月/季/年/5 年的分期本来就记在未来的周上，
+        ///    照周库那样丢弃晚于当前周的记录，会让一读档分期就少掉一大半。
+        /// </summary>
+        public void PruneInvestments()
+        {
+            if (Investments == null || Investments.Count == 0) return;
+            long lo = (long)GameWeek.CurrentWeek + 1 - ModSettings.MaxPeriodWeeks;
+            System.Collections.Generic.List<ushort> empty = null;
+            foreach (System.Collections.Generic.KeyValuePair<ushort,
+                     System.Collections.Generic.List<InvestInstallment>> kv in Investments)
+            {
+                System.Collections.Generic.List<InvestInstallment> list = kv.Value;
+                if (list == null) { (empty ?? (empty = new System.Collections.Generic.List<ushort>())).Add(kv.Key); continue; }
+                for (int i = list.Count - 1; i >= 0; i--)
+                    if ((long)list[i].Week < lo) list.RemoveAt(i);
+                if (list.Count == 0)
+                    (empty ?? (empty = new System.Collections.Generic.List<ushort>())).Add(kv.Key);
+            }
+            if (empty == null) return;
+            for (int i = 0; i < empty.Count; i++) Investments.Remove(empty[i]);
         }
 
         /// <summary>层级数据按存档区分：用存档唯一标识作为文件名 key，互不覆盖。</summary>

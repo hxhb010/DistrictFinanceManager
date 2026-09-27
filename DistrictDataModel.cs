@@ -39,6 +39,31 @@ namespace DistrictFinanceManager
     }
 
     /// <summary>
+    /// 一笔「自定义政府投资额」的**周度分期**记录（2026-09-26 起）。
+    ///
+    /// 玩家录入的一笔钱不再是一个累积标量，而是按**当前统计周期**均摊成 N 份
+    /// （N = ModSettings.PeriodWeeks：周 1 / 月 4 / 季 13 / 年 52 / 5年 260），
+    /// 从**录入当周**起每周计入一份 —— 于是每一次录入在存档里就是 N 条本记录。
+    ///
+    /// 统计口径与「建筑价值增量」一致：只累加**最近 N 周**窗口内的分期（滚动窗口）。
+    /// 所以一笔钱是「涨上来再退下去」的：刚录入只算进第一期，逐周涨到整笔，
+    /// 再过一个周期又会逐周退出窗口 —— 这是滚动窗口的固有行为，不是 bug。
+    ///
+    /// 单位口径：原版 kr/周（原始值），显示时才乘 Panel.InvestMult()。
+    /// 未来周的分期**必须保留**（月/季/年的分期就记在未来周上），
+    /// 因此读档时**不能**照周库那样丢弃晚于当前周的记录，否则一读档分期就少掉一大半。
+    /// </summary>
+    public struct InvestInstallment
+    {
+        /// <summary>这一份计入哪个原版游戏周（GameWeek.CurrentWeek 口径）。</summary>
+        public uint Week;
+        /// <summary>这一份的金额（原版 kr/周，未乘显示系数）。</summary>
+        public double Amount;
+
+        public InvestInstallment(uint week, double amount) { Week = week; Amount = amount; }
+    }
+
+    /// <summary>
     /// 层级关系存储：每个原版 district ID → 父级 ID + 层级 + 子级列表
     /// </summary>
     public class DistrictHierarchy

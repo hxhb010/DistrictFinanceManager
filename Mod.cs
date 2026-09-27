@@ -77,14 +77,29 @@ namespace DistrictFinanceManager
 
             helper.AddSpace(4);
 
+            helper.AddCheckbox(
+                "打开存档时自动显示面板 / Show panel on save load",
+                _settings.ShowOnLoad,
+                value => { _settings.ShowOnLoad = value; _settings.Save(); });
+
+            helper.AddSpace(4);
+
             helper.AddSpace(16);
 
-            // 现实化数据（显示单位/换算）
-            string[] displayOptions = { "Vanilla weekly / 原版周化", "Vanilla yearly / 原版年化", "RMB yearly / 人民币年化", "USD yearly / 美元年化" };
-            UIDropDown displayDrop = helper.AddDropdown("Realistic data / 现实化数据",
-                displayOptions, _settings.DisplayMode,
-                value => { _settings.DisplayMode = value; _settings.Save(); }) as UIDropDown;
-            if (displayDrop != null) displayDrop.width += 100f; // 选项窗口控件加宽 100px
+            // 统计模式：拆成「货币 × 周期」两个独立的轴（面板右上角也有对应的两个循环按键）
+            string[] curOptions = { "Vanilla kr / 原版", "RMB / 人民币", "USD / 美元" };
+            UIDropDown curDrop = helper.AddDropdown("Currency / 货币",
+                curOptions, _settings.DisplayCurrency,
+                value => { _settings.DisplayCurrency = value; _settings.Save(); }) as UIDropDown;
+            if (curDrop != null) curDrop.width += 100f; // 选项窗口控件加宽 100px
+
+            helper.AddSpace(6);
+
+            string[] perOptions = { "Week / 周", "Month / 月", "Quarter / 季", "Year / 年", "5 Years / 5年" };
+            UIDropDown perDrop = helper.AddDropdown("Period / 周期",
+                perOptions, _settings.DisplayPeriod,
+                value => { _settings.DisplayPeriod = value; _settings.Save(); }) as UIDropDown;
+            if (perDrop != null) perDrop.width += 100f;
 
             helper.AddSpace(6);
 

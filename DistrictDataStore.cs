@@ -114,48 +114,86 @@ namespace DistrictFinanceManager
             return Path.Combine(GetDir(), safe + ".grp");
         }
 
-        /// <summary>按存档保存「自定义政府投资额」，每行 `D &lt;区划ID&gt; &lt;原始值&gt;`。</summary>
-        public static void SaveInvestments(Dictionary<ushort, double> investments, string saveName)
+        /// <summary>
+        /// 按存档保存「自定义政府投资额」的**分期表**：每行 `D &lt;区划ID&gt; &lt;游戏周&gt; &lt;该期金额&gt;`。
+        /// 金额是**单期**的原始值（原版 kr/周），不是累计额 —— 一笔录入会被拆成 N 行（N = 录入时的周期周数）。
+        /// 2026-09-26 之前是 `D &lt;ID&gt; &lt;累计额&gt;`（无周号），读取时按「本周录入」迁移，见 LoadInvestments。
+        /// </summary>
+        public static void SaveInvestments(Dictionary<ushort, List<InvestInstallment>> investments, string saveName)
         {
             try
             {
                 string dir = GetDir();
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 string path = GetInvestPath(saveName);
+                int rows = 0;
                 using (StreamWriter w = new StreamWriter(path, false, System.Text.Encoding.UTF8))
                 {
-                    foreach (KeyValuePair<ushort, double> kv in investments)
-                        w.WriteLine("D " + kv.Key + " " + kv.Value.ToString("0.###",
-                            System.Globalization.CultureInfo.InvariantCulture));
+                    foreach (KeyValuePair<ushort, List<InvestInstallment>> kv in investments)
+                    {
+                        List<InvestInstallment> list = kv.Value;
+                        if (list == null) continue;
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            w.WriteLine("D " + kv.Key + " " + list[i].Week + " " + list[i].Amount.ToString(
+                                "0.###", System.Globalization.CultureInfo.InvariantCulture));
+                            rows++;
+                        }
+                    }
                 }
-                Debug.Log("[DFM] Investments saved: " + investments.Count + " -> " + path);
+                Debug.Log("[DFM] Investments saved: " + investments.Count + " districts / " + rows + " installments -> " + path);
             }
             catch (Exception ex) { Debug.LogError("[DFM] Save investments failed: " + ex.Message); }
         }
 
-        /// <summary>读取该存档的「自定义政府投资额」；无文件则返回空字典。坏行跳过，不抛。</summary>
-        public static Dictionary<ushort, double> LoadInvestments(string saveName)
+        /// <summary>
+        /// 读取该存档的「自定义政府投资额」分期表；无文件则返回空字典。坏行跳过，不抛。
+        /// 兼容旧格式 `D &lt;ID&gt; &lt;累计额&gt;`（无周号的那批）：当成「在当前周一次性录入」的一条分期迁进来
+        /// —— 旧数据没有任何周号可用，锚在当周是最不坏的解读（此后按正常分期逐周退出窗口）。
+        /// </summary>
+        public static Dictionary<ushort, List<InvestInstallment>> LoadInvestments(string saveName)
         {
-            var map = new Dictionary<ushort, double>();
+            var map = new Dictionary<ushort, List<InvestInstallment>>();
             try
             {
                 string path = GetInvestPath(saveName);
                 if (!File.Exists(path)) return map;
+                uint legacyWeek = GameWeek.CurrentWeek;
+                int legacy = 0;
                 foreach (string line in File.ReadAllLines(path))
                 {
                     string t = line.Trim();
                     if (t.Length == 0 || t[0] != 'D') continue;
                     string[] parts = t.Split(new char[] { ' ', '\t' },
                         StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length < 3) continue;
                     ushort id;
-                    double v;
+                    if (parts.Length < 3) continue;
                     if (!ushort.TryParse(parts[1], out id) || id == 0) continue;
-                    if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
-                    map[id] = v;
+
+                    double v;
+                    uint week;
+                    if (parts.Length >= 4)
+                    {
+                        // 新格式：D <id> <week> <amount>
+                        if (!uint.TryParse(parts[2], out week)) continue;
+                        if (!double.TryParse(parts[3], System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
+                    }
+                    else
+                    {
+                        // 旧格式：D <id> <amount>
+                        if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out v)) continue;
+                        week = legacyWeek;
+                        legacy++;
+                    }
+
+                    List<InvestInstallment> list;
+                    if (!map.TryGetValue(id, out list)) { list = new List<InvestInstallment>(); map[id] = list; }
+                    list.Add(new InvestInstallment(week, v));
                 }
-                Debug.Log("[DFM] Investments loaded: " + map.Count);
+                Debug.Log("[DFM] Investments loaded: " + map.Count + " districts"
+                    + (legacy > 0 ? "（其中 " + legacy + " 行为旧格式，已按本周一次性录入迁移）" : ""));
             }
             catch (Exception ex) { Debug.LogWarning("[DFM] Load investments failed: " + ex.Message); }
             return map;
@@ -277,7 +315,20 @@ namespace DistrictFinanceManager
                         h.LevelOf[kid] = (int)vid;
                     }
                 }
-                Debug.Log("[DFM] Hierarchy loaded: " + h.LevelOf.Count + " districts");
+                // 诊断：把根节点（无父级 = 独立节点）列出来，用来判断「独立区县」到底有没有读进来
+                var sb = new System.Text.StringBuilder();
+                int rootCount = 0;
+                foreach (KeyValuePair<ushort, int> kv in h.LevelOf)
+                {
+                    ushort rid = kv.Key;
+                    if (!h.ParentOf.ContainsKey(rid) || h.ParentOf[rid] == 0)
+                    {
+                        rootCount++;
+                        if (rootCount <= 24) sb.Append(rid).Append("(L").Append(kv.Value).Append(") ");
+                    }
+                }
+                Debug.Log("[DFM] Hierarchy loaded: " + h.LevelOf.Count + " districts, key='" + saveName +
+                    "', roots=" + rootCount + " -> " + sb.ToString());
             }
             catch (Exception ex) { Debug.LogError("[DFM] Load failed: " + ex.Message); }
             return h;

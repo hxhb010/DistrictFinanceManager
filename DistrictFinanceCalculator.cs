@@ -546,22 +546,22 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>地价显示倍率（RMB ×420 / USD ×60），与面板 LandMult() 口径一致。</summary>
+        /// <summary>价格系数（地价 / 增量里的地价）：原版 1 / 人民币 420 / 美元 60。
+        /// ⚠️ 真源在 ModSettings.PriceFactor —— 面板侧的 LandMult() 必须调同一个，别再各写一份。</summary>
         private static double LandMultForCalc()
         {
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             if (hub != null && hub.Settings != null)
-            {
-                if (hub.Settings.DisplayMode == 2) return 420.0;
-                if (hub.Settings.DisplayMode == 3) return 60.0;
-            }
+                return ModSettings.PriceFactor(hub.Settings.DisplayCurrency);
             return 1.0;
         }
 
-        /// <summary>周期周数：年化(1/2/3) = 52 周；周化(0) = 1 周。</summary>
+        /// <summary>周期周数（增量基准回退几周）：周/月/季/年/5年 = 1/4/13/52/260。</summary>
         private static int PeriodWeeksForCalc()
         {
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
-            if (hub != null && hub.Settings != null && hub.Settings.DisplayMode != 0) return 52;
+            if (hub != null && hub.Settings != null)
+                return ModSettings.PeriodWeeks(hub.Settings.DisplayPeriod);
             return 1;
         }
 
@@ -1129,19 +1129,19 @@ namespace DistrictFinanceManager
             return _avgLandValue;
         }
 
-        /// <summary>现实化数据换算系数（GDP/人均）：0 原版按周×1，1 原版按年×52，2 人民币×2625，3 美元×375。（地价另按 ×420/×60 换算）</summary>
+        /// <summary>
+        /// 现实化数据换算系数（GDP / 人均GDP / 地均GDP / 人均可支配）。
+        /// **两个轴相乘**：流量货币系数 × 周期周数。
+        ///   原版周 = 1、原版年 = 52、人民币年 = 2625、美元年 = 375（与旧 DisplayMode 完全一致）
+        ///   新增组合如 人民币月 = 2625/52×4 ≈ 201.9、美元5年 = 375/52×260 = 1875
+        /// ⚠️ 地价走的是**另一套**价格系数（1/420/60，与周期无关），见 LandMultForCalc。
+        /// </summary>
         public static double GetDisplayFactor()
         {
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             if (hub != null && hub.Settings != null)
-            {
-                switch (hub.Settings.DisplayMode)
-                {
-                    case 1: return 52.0;
-                    case 2: return 2625.0; // 人民币年化
-                    case 3: return 375.0;  // 美元年化
-                }
-            }
+                return ModSettings.FlowFactor(hub.Settings.DisplayCurrency)
+                     * ModSettings.PeriodWeeks(hub.Settings.DisplayPeriod);
             return 1.0;
         }
 
@@ -1361,27 +1361,44 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
-        /// 计入收入统计的公共服务建筑：公园(Beautification)、垃圾、医疗、警察、教育、消防、灾害，
-        /// 以及大学 DLC(PlayerEducation) 与博物馆/大学体育(Museums/VarsitySports)。
+        /// 计入收入 / 工作人数 / GDP 的「服务类工作场所」。
+        /// ⚠️ **2026-09-22 由白名单改为排除法**：原先只列了
+        /// 公园/垃圾/医疗/警察/教育/消防/灾害/大学DLC/博物馆/大学体育，
+        /// **漏掉了公交与轨道交通（火车站、地铁站、公交站、机场、港口）**，
+        /// 以及电力、供水、旅游、酒店、渔业、纪念碑、服务点、赛道等一干服务建筑 ——
+        /// 这些建筑里的在岗市民（`m_workBuilding == 本建筑`）同样是居民收入，没理由排除。
+        /// 现在只排除「不是建筑用途」和「另有专属权重分支的商/工/办/玩家产业」。
+        /// 真正没有工人的建筑计数自然是 0，所以**宁可多算不漏算**。
         /// 刻意与 IsExpenseBuilding 分开：那个用于「支出」统计，改它会变动既有数值。
         /// </summary>
         private static bool IsServiceWorkplace(ItemClass.Service svc)
         {
-            if (svc == ItemClass.Service.Beautification) return true;   // 公园建筑
             switch (svc)
             {
-                case ItemClass.Service.Garbage:
-                case ItemClass.Service.HealthCare:
-                case ItemClass.Service.PoliceDepartment:
-                case ItemClass.Service.Education:
-                case ItemClass.Service.FireDepartment:
-                case ItemClass.Service.Disaster:
-                case ItemClass.Service.PlayerEducation:
-                case ItemClass.Service.Museums:
-                case ItemClass.Service.VarsitySports:
-                    return true;
+                // ① 不是「有工人的建筑」：自然地貌 / 载具 / 市民 / 道路 / 空
+                case ItemClass.Service.None:
+                case ItemClass.Service.Natural:
+                case ItemClass.Service.Vehicles:
+                case ItemClass.Service.Citizen:
+                case ItemClass.Service.Road:
+                // ② 住宅：单独走居民分支，不是工作场所
+                case ItemClass.Service.Residential:
+                // ③ 商 / 工 / 办 / 玩家产业：由 IsIncomeWorkplace 的另一半负责，
+                //    且 IncomeWeightOf(1421-1423) / GdpWeightOf **在服务类之前**给它们
+                //    各自的专属权重 —— 这里若返回 true 会把它们的权重覆盖成 1.50 / 2.00。
+                case ItemClass.Service.Commercial:
+                case ItemClass.Service.Industrial:
+                case ItemClass.Service.Office:
+                case ItemClass.Service.PlayerIndustry:
+                    return false;
             }
-            return false;
+            // 其余一律按「服务类工作场所」处理：公园 / 垃圾 / 医疗 / 警察 / 教育 / 消防 / 灾害 /
+            // 大学DLC / 博物馆 / 大学体育，以及 —— **2026-09-22 补上的** ——
+            // 公交与轨道交通（火车站 / 地铁站 / 公交站 / 机场 / 港口 = PublicTransport）、
+            // 电力、供水、旅游、酒店、渔业、纪念碑、服务点、赛道等。
+            // 用排除法而不是白名单，是为了**宁可多算不漏算**：真正没有工人的建筑
+            // （公园、纪念碑之类）计数自然是 0，不会贡献任何值。
+            return true;
         }
 
         /// <summary>有等级的收入建筑满级数（商业 / 办公 / 普通工业区都是 3 级）。</summary>
