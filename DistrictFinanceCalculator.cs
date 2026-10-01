@@ -1432,6 +1432,16 @@ namespace DistrictFinanceManager
         private double[] _commuteProg;      private float _commuteProgTime;
         private double[] _aggCommuteProg;   private float _aggCommuteProgTime;
 
+        // ---- 「路径通勤距离」（2026-10-01 新增，面板键 11 的第二个子口径）----
+        // 与「平均通勤距离」（直线距离）并列：直线距离 = 居住建筑中心点 ↔ 工作建筑中心点（自动算，不用跟踪）；
+        // 路径距离 = **市民实际走的那条路**，只能靠跟踪（开始/停止）逐趟量。
+        // 量与「通勤时间」**共用同一套样本缓冲**（同一次结算同时压入时长与路程，FIFO/门槛/容量全共用），
+        // 这里只是**另一组派生缓存**。单位：缓冲里存**米**，getter 出 **km**（与 GetCommuteDistance 同口径）。
+        private double[] _pathDist;         private float _pathDistTime;
+        private double[] _pathTop;          private float _pathTopTime;
+        private double[] _aggPathDist;      private float _aggPathDistTime;
+        private double[] _aggPathTop;       private float _aggPathTopTime;
+
         /// <summary>
         /// 显示口径（用户 2026-09-27 定）：**60 模拟帧 = 10 秒** ⇒ 1 帧 = 1/6 秒。
         /// 也就是「模拟速率 6 帧/秒」下的**现实等效时间** —— 通勤时长按模拟帧数算，不经过游戏日历。
@@ -1986,6 +1996,13 @@ namespace DistrictFinanceManager
         /// <summary>按市民 ID 记「这一趟的出发帧」（0 = 没在跟踪）与上一次看到的位置。</summary>
         private uint[] _tripStart;
         private byte[] _lastLoc;
+        // ---- 路径距离的逐趟累加（2026-10-01）----
+        /// <summary>这一趟**已经走过的路程（米）**：每轮轮询累加「与上一拍的位置位移」。</summary>
+        private double[] _tripDist;
+        /// <summary>上一拍该市民的世界坐标（走路取实例、乘车取车辆）。</summary>
+        private UnityEngine.Vector3[] _lastPos;
+        /// <summary>上一拍的坐标是否有效（无效就不累加，也不刷新基准）。</summary>
+        private bool[] _hasPos;
         /// <summary>哪些 ID 在名单里（1 在 / 0 不在；发布时用 2 当临时戳记）。</summary>
         private byte[] _watched;
         /// <summary>
@@ -1996,10 +2013,16 @@ namespace DistrictFinanceManager
         /// </summary>
         private class CommuteSamples
         {
-            public double[] Buf;   // 环形缓冲
+            public double[] Buf;   // 环形缓冲（通勤时间：分钟）
             public int Count;      // 已有样本数（≤ Buf.Length）
             public int Head;       // 下一个写入位置
             public double Sum;     // 缓冲内之和
+            // 与 Buf **同长同序**的并行缓冲：同一趟的**路径距离（米）**（2026-10-01 加）。
+            // 两者共用 Count/Head —— 一次结算同时压两个量，FIFO/扩容/淘汰天然对齐。
+            // 老档（.commute 里没有 P 行）读出来 BufDist 为 null → 路径口径记 0（＝无数据），
+            // 时间口径照旧，互不影响。
+            public double[] BufDist;
+            public double SumDist;
         }
         private readonly CommuteSamples[] _samples = new CommuteSamples[256];
 
@@ -2046,6 +2069,13 @@ namespace DistrictFinanceManager
         ///    注意上限只影响**丢弃**，不影响换算（分钟 = 帧 ÷ 360）。
         /// </summary>
         private const uint COMMUTE_TRIP_MAX_FRAMES = 108000;   // 300 分钟（5 小时）× 360 帧/分钟
+        /// <summary>
+        /// 两拍之间**单次位移的上限（米）**（路径距离用，2026-10-01）：轮询间隔 15 帧 = 0.25 模拟秒，
+        /// 现实里最快也就 150 km/h ≈ 10.4 米/拍；超过这个数只可能是「车/人刚生成」「换乘瞬移」「进出建筑」
+        /// 这类跳变 —— 那种位移不算进路程（否则一条地铁线会被算成几公里）。
+        /// 取 300 米留足了余量（约 4300 km/h），正常通勤绝不会碰到。
+        /// </summary>
+        private const float COMMUTE_PATH_MAX_STEP = 300f;
 
         // 性能诊断（只在 ShowDebug 下打印）
         private int _dbgPollFrames;        // 日志窗口内轮询了几次（算每次耗时）
@@ -2053,6 +2083,8 @@ namespace DistrictFinanceManager
         private float _dbgTripLogTime;
         // 窗口内结算出来的样本「帧数」分布（用来判断换算合不合理）
         private int _dbgTripMinFrames = int.MaxValue, _dbgTripMaxFrames, _dbgTripSampleN;
+        // 窗口内路径距离的合计与趟数（诊断：与直线距离比一下，正常应是它的 1.2~2 倍）
+        private double _dbgPathMeters; private int _dbgPathN;
         private long _dbgTripSumFrames;
         // 窗口内的「出发 / 到达 / 丢弃」计数（诊断：出发与到达应当同量级）
         private int _dbgDeparted, _dbgArrived, _dbgDropHome, _dbgDropTimeout;
@@ -2096,6 +2128,7 @@ namespace DistrictFinanceManager
             _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
             _commuteTop = null; _aggCommuteTop = null;
             _commuteProg = null; _aggCommuteProg = null;
+            _pathDist = null; _pathTop = null; _aggPathDist = null; _aggPathTop = null;
             Debug.Log("[DFM] 通勤时间统计：开始（保留已留存样本 " + CommuteSampleTotal + " 趟，继续攒）");
         }
 
@@ -2115,6 +2148,7 @@ namespace DistrictFinanceManager
             _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;   // 派生缓存作废
             _commuteTop = null; _aggCommuteTop = null;
             _commuteProg = null; _aggCommuteProg = null;
+            _pathDist = null; _pathTop = null; _aggPathDist = null; _aggPathTop = null;
             Debug.Log("[DFM] 通勤时间统计：停止（丢弃 " + dropped + " 条在途行程，保留已留存样本 "
                 + CommuteSampleTotal + " 趟）");
             // 停止是个天然检查点：把留存样本落盘（用户 2026-09-27：「样本保存后要留着」）
@@ -2149,6 +2183,7 @@ namespace DistrictFinanceManager
                 _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
                 _commuteTop = null; _aggCommuteTop = null;
                 _commuteProg = null; _aggCommuteProg = null;
+                _pathDist = null; _pathTop = null; _aggPathDist = null; _aggPathTop = null;
                 _tripPollFrame = 0;
                 _commuteRunning = false; // 新存档要重新点「开始」（用户 2026-09-27：只有开始时才统计）
             }
@@ -2196,13 +2231,15 @@ namespace DistrictFinanceManager
                         + " 回家丢弃=" + _dbgDropHome + " 超时丢弃=" + _dbgDropTimeout
                         + " | 位置分布 家=" + _dbgLoc[0] + " 单位=" + _dbgLoc[1] + " 访问=" + _dbgLoc[2]
                         + " 在路上=" + _dbgLoc[3] + " 酒店=" + _dbgLoc[4]
-                        + " | 在途平均已跑=" + (_dbgInFlightN > 0 ? _dbgInFlightFrames / _dbgInFlightN : 0) + "帧");
+                        + " | 在途平均已跑=" + (_dbgInFlightN > 0 ? _dbgInFlightFrames / _dbgInFlightN : 0) + "帧"
+                        + " 路径均=" + (_dbgPathN > 0 ? (_dbgPathMeters / _dbgPathN / 1000.0).ToString("0.00") + "km" : "—"));
                     _dbgPollFrames = 0; _dbgTripMs = 0.0;
                     _dbgTripSampleN = 0; _dbgTripSumFrames = 0L;
                     _dbgTripMinFrames = int.MaxValue; _dbgTripMaxFrames = 0;
                     _dbgDeparted = 0; _dbgArrived = 0; _dbgDropHome = 0; _dbgDropTimeout = 0;
                     for (int d2 = 0; d2 < 8; d2++) _dbgLoc[d2] = 0;
                     _dbgInFlightFrames = 0L; _dbgInFlightN = 0;
+                    _dbgPathMeters = 0.0; _dbgPathN = 0;
                     _dbgTripLogTime = Time.time;
                 }
             }
@@ -2228,6 +2265,9 @@ namespace DistrictFinanceManager
             {
                 _tripStart = new uint[size];
                 _lastLoc = new byte[size];
+                _tripDist = new double[size];
+                _lastPos = new UnityEngine.Vector3[size];
+                _hasPos = new bool[size];
             }
             long[] emp = null;      // 惰性：真要记账时才取（门槛/容量用）
             int inflight = 0;
@@ -2240,6 +2280,9 @@ namespace DistrictFinanceManager
                 byte last = _lastLoc[cid];
                 _lastLoc[cid] = loc;
                 uint start = _tripStart[cid];
+                // 先取这一拍的位置（走路取实例、乘车取车辆）——「出发」那一拍要拿它当基准点
+                UnityEngine.Vector3 pos = UnityEngine.Vector3.zero;
+                bool hasPos = TryGetCitizenPos(citizens, cid, out pos);
                 if (loc == (byte)Citizen.Location.Work)
                 {
                     if (start == 0) continue;                  // 本来就在单位：不是一趟
@@ -2247,19 +2290,23 @@ namespace DistrictFinanceManager
                     _dbgArrived++;
                     uint elapsed = frame - start;
                     double minutes = (double)elapsed * REAL_SECONDS_PER_FRAME / 60.0;
+                    // 路径距离（米）：这一趟逐拍累加出来的值（没跟踪到位置就是 0）
+                    double meters = _tripDist != null && cid < _tripDist.Length ? _tripDist[cid] : 0.0;
+                    _tripDist[cid] = 0.0;
                     if (elapsed == 0 || minutes > 300.0) continue;   // 明显不合理的单趟丢掉（与 COMMUTE_TRIP_MAX_FRAMES = 300 分钟一致）
                     int hd = _watchHome[k];
                     if (hd <= 0 || hd >= 256) continue;
                     if (emp == null) emp = GetCommuteCount();
-                    // 压进该区划的 FIFO（容量按该区划的就业居民数定；满了淘汰最早的一趟）
-                    PushCommuteSample(hd, minutes, emp[hd]);
+                    // 压进该区划的 FIFO（容量按该区划的就业居民数定；满了淘汰最早的一趟）——时长与路程同压
+                    PushCommuteSample(hd, minutes, meters, emp[hd]);
                     _dbgTripSampleN++; _dbgTripSumFrames += elapsed;
+                    _dbgPathMeters += meters; _dbgPathN++;
                     if ((int)elapsed < _dbgTripMinFrames) _dbgTripMinFrames = (int)elapsed;
                     if ((int)elapsed > _dbgTripMaxFrames) _dbgTripMaxFrames = (int)elapsed;
                 }
                 else if (loc == (byte)Citizen.Location.Home)
                 {
-                    if (start != 0) { _tripStart[cid] = 0; _dbgDropHome++; }   // 半路回家 → 不是到岗
+                    if (start != 0) { _tripStart[cid] = 0; _tripDist[cid] = 0.0; _dbgDropHome++; }  // 半路回家 → 不是到岗
                 }
                 else
                 {
@@ -2269,17 +2316,67 @@ namespace DistrictFinanceManager
                         if (last == (byte)Citizen.Location.Home)
                         {
                             _tripStart[cid] = frame;   // 刚从家出来 → 出发
+                            _tripDist[cid] = 0.0;      // 路程从 0 起算
                             _dbgDeparted++;
                         }
                     }
                     else if (frame - start >= COMMUTE_TRIP_MAX_FRAMES)
                     {
-                        _tripStart[cid] = 0; _dbgDropTimeout++;   // 太久没到 → 丢弃（不记账）
+                        _tripStart[cid] = 0; _tripDist[cid] = 0.0; _dbgDropTimeout++;   // 太久没到 → 丢弃（不记账）
                     }
-                    else { inflight++; _dbgInFlightFrames += frame - start; _dbgInFlightN++; }
+                    else
+                    {
+                        // 路径距离累加：与上一拍的位移（跳变不算 —— 车辆/市民刚生成、换乘瞬移、进出建筑）
+                        if (hasPos && _hasPos != null && _hasPos[cid])
+                        {
+                            float d = UnityEngine.Vector3.Distance(_lastPos[cid], pos);
+                            if (d > 0.01f && d < COMMUTE_PATH_MAX_STEP) _tripDist[cid] += d;
+                        }
+                        inflight++; _dbgInFlightFrames += frame - start; _dbgInFlightN++;
+                    }
                 }
+                // 刷新位置基准（无论这一拍是什么状态）——下一拍要用
+                if (hasPos) { _lastPos[cid] = pos; if (_hasPos != null) _hasPos[cid] = true; }
+                else if (_hasPos != null) _hasPos[cid] = false;
             }
             return inflight;
+        }
+
+        /// <summary>
+        /// 取某个市民**当前的世界坐标**（路径距离用，2026-10-01）。三条规则：
+        ///   · 坐在车里（`Citizen.m_vehicle` ≠ 0）→ 用**车辆**的 `GetLastFramePosition()`
+        ///     （自驾、公交、地铁、火车都走这条 —— 乘客自己的坐标是过期的）；
+        ///   · 走路（`m_instance` ≠ 0）→ 用**市民实例**的 `GetLastFramePosition()`；
+        ///   · 都没有（在建筑里/换乘间隙）→ 返回 false，这一拍不累加。
+        /// ⚠️ **不要改用 `PathUnit.m_length`**：乘客"当前的路径"是**整条公交线路**，读它会把整条线算成一趟路程。
+        /// </summary>
+        private static bool TryGetCitizenPos(Citizen[] citizens, uint cid, out UnityEngine.Vector3 pos)
+        {
+            pos = UnityEngine.Vector3.zero;
+            try
+            {
+                Citizen c = citizens[cid];
+                ushort veh = c.m_vehicle;
+                if (veh != 0)
+                {
+                    VehicleManager vm = Singleton<VehicleManager>.instance;
+                    if (vm == null) return false;
+                    Vehicle[] vb = vm.m_vehicles.m_buffer;
+                    if (vb == null || veh >= vb.Length) return false;
+                    if ((vb[veh].m_flags & Vehicle.Flags.Created) == 0) return false;
+                    pos = vb[veh].GetLastFramePosition();
+                    return true;
+                }
+                CitizenManager cm = Singleton<CitizenManager>.instance;
+                if (cm == null) return false;
+                CitizenInstance[] ib = cm.m_instances.m_buffer;
+                ushort inst = c.m_instance;
+                if (ib == null || inst == 0 || inst >= ib.Length) return false;
+                if ((ib[inst].m_flags & CitizenInstance.Flags.Created) == 0) return false;
+                pos = ib[inst].GetLastFramePosition();
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>清掉所有「在途」的出发记录（**不动已留存样本**）。</summary>
@@ -2287,6 +2384,8 @@ namespace DistrictFinanceManager
         {
             if (_tripStart != null) System.Array.Clear(_tripStart, 0, _tripStart.Length);
             if (_lastLoc != null) System.Array.Clear(_lastLoc, 0, _lastLoc.Length);
+            if (_tripDist != null) System.Array.Clear(_tripDist, 0, _tripDist.Length);
+            if (_hasPos != null) System.Array.Clear(_hasPos, 0, _hasPos.Length);
         }
 
         /// <summary>当前在途（已出发、还没到单位）的趟数。</summary>
@@ -2318,21 +2417,35 @@ namespace DistrictFinanceManager
             int size = 0;
             CitizenManager cm = Singleton<CitizenManager>.instance;
             if (cm != null) size = cm.m_citizens.m_buffer.Length;
-            if (_tripStart == null || _tripStart.Length < size) { _tripStart = new uint[size]; _lastLoc = new byte[size]; }
+            if (_tripStart == null || _tripStart.Length < size)
+            {
+                _tripStart = new uint[size]; _lastLoc = new byte[size];
+                _tripDist = new double[size]; _lastPos = new UnityEngine.Vector3[size]; _hasPos = new bool[size];
+            }
             if (_watched == null || _watched.Length < size) _watched = new byte[size];
 
             for (int k = 0; k < n; k++)                       // ① 新进的：清状态 + 打戳记 2
             {
                 uint cid = nw[k];
                 if (cid == 0 || cid >= _watched.Length) continue;
-                if (_watched[cid] == 0) { _tripStart[cid] = 0; _lastLoc[cid] = 0; }
+                if (_watched[cid] == 0)
+                {
+                    _tripStart[cid] = 0; _lastLoc[cid] = 0;
+                    if (_tripDist != null) _tripDist[cid] = 0.0;
+                    if (_hasPos != null) _hasPos[cid] = false;
+                }
                 _watched[cid] = 2;
             }
             for (int k = 0; k < _watchCount; k++)             // ② 退出的：清状态 + 归零
             {
                 uint cid = _watch[k];
                 if (cid == 0 || cid >= _watched.Length) continue;
-                if (_watched[cid] != 2) { _watched[cid] = 0; _tripStart[cid] = 0; _lastLoc[cid] = 0; }
+                if (_watched[cid] != 2)
+                {
+                    _watched[cid] = 0; _tripStart[cid] = 0; _lastLoc[cid] = 0;
+                    if (_tripDist != null) _tripDist[cid] = 0.0;
+                    if (_hasPos != null) _hasPos[cid] = false;
+                }
             }
             for (int k = 0; k < n; k++)                       // ③ 收尾：戳记 2 → 1
             {
@@ -2612,6 +2725,18 @@ namespace DistrictFinanceManager
                     sb.Append(' ').Append(smp.Buf[(start + k) % smp.Buf.Length]
                         .ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
                 sb.Append('\n');
+                // 同一批样本的**路径距离（米）**（2026-10-01 加）：另起 P 行，与 D 行同序同数量。
+                // ⚠️ 刻意**不合并进 D 行**：D 行的布局是 v2 的既有约定，改它会让老版本误读整份文件；
+                //    P 是**新增的可选标签** —— 老版本读到会跳过（它只认 D），新版本读旧文件（没有 P）就是
+                //    「路径样本为空」→ 路径口径显示白色 0，等新样本攒起来。**因此不必升版本号。**
+                if (smp.BufDist != null)
+                {
+                    sb.Append("P ").Append(i).Append(' ').Append(keep);
+                    for (int k = n - keep; k < n; k++)
+                        sb.Append(' ').Append(smp.BufDist[(start + k) % smp.BufDist.Length]
+                            .ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
+                    sb.Append('\n');
+                }
             }
             return sb.ToString();
         }
@@ -2658,6 +2783,34 @@ namespace DistrictFinanceManager
                 t = t.Trim();
                 if (t.Length == 0 || t[0] == '#') continue;
                 string[] parts = t.Split(' ');
+                // P 行 = 同一批样本的路径距离（米），填进已经由 D 行建好的缓冲（2026-10-01）。
+                // D 行一定在 P 行之前（写入顺序如此），所以这里只做填充，不建缓冲。
+                if (parts.Length >= 3 && parts[0] == "P")
+                {
+                    int pid, pcount;
+                    if (!int.TryParse(parts[1], System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out pid)) continue;
+                    if (!int.TryParse(parts[2], System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out pcount)) continue;
+                    if (pid <= 0 || pid >= 256 || pcount <= 0) continue;
+                    CommuteSamples ps = _samples[pid];
+                    if (ps == null || ps.Buf == null) continue;
+                    int pavail = parts.Length - 3;
+                    int pn = pcount < pavail ? pcount : pavail;
+                    if (pn > ps.Buf.Length) pn = ps.Buf.Length;
+                    if (pn <= 0) continue;
+                    double[] pd = new double[ps.Buf.Length];
+                    bool pbad = false;
+                    for (int k = 0; k < pn; k++)
+                    {
+                        double v;
+                        if (!double.TryParse(parts[3 + k], System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out v)) { pbad = true; break; }
+                        pd[k] = v; ps.SumDist += v;
+                    }
+                    if (pbad) continue;
+                    ps.BufDist = pd;   // 顺序按文件（= 时间缓冲的顺序），Head/Count 沿用 D 行的
+                }
                 if (parts.Length < 3 || parts[0] != "D") continue;
                 int id, count;
                 if (!int.TryParse(parts[1], System.Globalization.NumberStyles.Integer,
@@ -2686,6 +2839,7 @@ namespace DistrictFinanceManager
             _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
             _commuteTop = null; _aggCommuteTop = null;
             _commuteProg = null; _aggCommuteProg = null;
+            _pathDist = null; _pathTop = null; _aggPathDist = null; _aggPathTop = null;
             Debug.Log("[DFM] 通勤样本：读回 " + ok + " 个区划（" + CommuteSampleTotal + " 趟）");
         }
 
@@ -2702,7 +2856,7 @@ namespace DistrictFinanceManager
         /// 容量 = max(1, 就业居民数 ÷ `COMMUTE_CAP_PER_RESIDENT`)。人变多导致容量变大时会扩容
         /// （按时间顺序把老样本搬到新缓冲）。
         /// </summary>
-        private void PushCommuteSample(int hd, double minutes, long employedResidents)
+        private void PushCommuteSample(int hd, double minutes, double meters, long employedResidents)
         {
             if (hd <= 0 || hd >= 256) return;
             CommuteSamples smp = _samples[hd];
@@ -2712,22 +2866,37 @@ namespace DistrictFinanceManager
             if (smp.Buf == null || smp.Buf.Length < cap)
             {
                 double[] nb = new double[cap];
+                double[] nd = new double[cap];
                 int n = smp.Count;
                 int start = (smp.Buf != null && smp.Count == smp.Buf.Length) ? smp.Head : 0;
-                for (int i = 0; i < n; i++) nb[i] = smp.Buf[(start + i) % smp.Buf.Length];
-                smp.Buf = nb; smp.Head = n % cap; smp.Count = n;
+                for (int i = 0; i < n; i++)
+                {
+                    nb[i] = smp.Buf[(start + i) % smp.Buf.Length];
+                    // 路程缓冲与时长缓冲同长同序；老档没有它（null）→ 补 0
+                    nd[i] = (smp.BufDist != null) ? smp.BufDist[(start + i) % smp.BufDist.Length] : 0.0;
+                }
+                smp.Buf = nb; smp.BufDist = nd; smp.Head = n % cap; smp.Count = n;
+            }
+            else if (smp.BufDist == null || smp.BufDist.Length != smp.Buf.Length)
+            {
+                smp.BufDist = new double[smp.Buf.Length];   // 兜底：与 Buf 对齐（不搬旧值，路径样本从 0 起）
             }
             if (smp.Count < smp.Buf.Length)
             {
                 smp.Buf[smp.Head] = minutes;
+                smp.BufDist[smp.Head] = meters;
                 smp.Count++;
                 smp.Sum += minutes;
+                smp.SumDist += meters;
             }
             else
             {
-                smp.Sum -= smp.Buf[smp.Head];   // 淘汰最早的那一趟
+                smp.Sum -= smp.Buf[smp.Head];           // 淘汰最早的那一趟
+                smp.SumDist -= smp.BufDist[smp.Head];
                 smp.Buf[smp.Head] = minutes;
+                smp.BufDist[smp.Head] = meters;
                 smp.Sum += minutes;
+                smp.SumDist += meters;
             }
             smp.Head = (smp.Head + 1) % smp.Buf.Length;
         }
@@ -2844,6 +3013,74 @@ namespace DistrictFinanceManager
             _aggCommuteTop = AggregateTime(GetCommuteTopTime());
             _aggCommuteTopTime = Time.time;
             return _aggCommuteTop;
+        }
+
+        // ================== 「路径通勤距离」（2026-10-01，键 11 的第二个子口径）==================
+        // 与「平均通勤距离」（直线距离，`GetCommuteDistance`）并列：那些是**几何直线**，不用跟踪；
+        // 这里是**市民实际走的路**（走路 / 开车 / 公交地铁火车全口径一致），只能靠「开始」后的轮询累加。
+        // 缓冲与时长**共用**（`CommuteSamples.BufDist`，单位米），所以门槛/容量/FIFO/进度全都一样，
+        // 这里只是把同一个缓冲的**另一个量**取出来，单位换成 km（与直线距离同口径）。
+        // 没有路径样本（老档没 P 行 / 没跟踪过）→ 0（＝面板上的白色「无数据」）。
+
+        /// <summary>路径通勤距离（km，均值口径）= 本区划留存样本里**路程**的平均；不够门槛 → 0。</summary>
+        public double[] GetCommutePathDistance()
+        {
+            if (_pathDist != null && Time.time - _pathDistTime < CacheLife()) return _pathDist;
+            double[] r = new double[256];
+            long[] emp = GetCommuteCount();
+            for (int i = 1; i < 256; i++)
+            {
+                CommuteSamples smp = _samples[i];
+                if (smp == null || smp.Count == 0 || smp.BufDist == null) continue;
+                if (CommuteSamplesEnough(smp.Count, emp[i])) r[i] = smp.SumDist / smp.Count / 1000.0;
+            }
+            _pathDist = r;
+            _pathDistTime = Time.time;
+            return r;
+        }
+
+        /// <summary>路径通勤距离的「最长 10%」口径（km）：每区划取留存样本里**路程最大的 10%** 求平均。</summary>
+        public double[] GetCommutePathTopDistance()
+        {
+            if (_pathTop != null && Time.time - _pathTopTime < CacheLife()) return _pathTop;
+            double[] r = new double[256];
+            long[] emp = GetCommuteCount();
+            for (int i = 1; i < 256; i++)
+            {
+                CommuteSamples smp = _samples[i];
+                if (smp == null || smp.Count == 0 || smp.BufDist == null) continue;
+                if (!CommuteSamplesEnough(smp.Count, emp[i])) continue;
+                double[] tmp = new double[smp.Count];
+                int start = (smp.Count == smp.Buf.Length) ? smp.Head : 0;
+                for (int k = 0; k < smp.Count; k++) tmp[k] = smp.BufDist[(start + k) % smp.BufDist.Length];
+                System.Array.Sort(tmp);
+                int take = smp.Count / 10;
+                if (take < 1) take = 1;
+                double sum = 0.0;
+                for (int k = smp.Count - take; k < smp.Count; k++) sum += tmp[k];
+                r[i] = sum / take / 1000.0;
+            }
+            _pathTop = r;
+            _pathTopTime = Time.time;
+            return r;
+        }
+
+        /// <summary>聚合路径通勤距离（km）= Σ子树(路程×趟数) ÷ Σ子树趟数（与通勤时间同一套加权函数）。</summary>
+        public double[] GetAggregateCommutePathDistance()
+        {
+            if (_aggPathDist != null && Time.time - _aggPathDistTime < CacheLife()) return _aggPathDist;
+            _aggPathDist = AggregateTime(GetCommutePathDistance());
+            _aggPathDistTime = Time.time;
+            return _aggPathDist;
+        }
+
+        /// <summary>聚合「最长 10%」路径通勤距离（km）：Σ子树(各区划 10% 分位 × 该区划趟数) ÷ Σ趟数。</summary>
+        public double[] GetAggregateCommutePathTopDistance()
+        {
+            if (_aggPathTop != null && Time.time - _aggPathTopTime < CacheLife()) return _aggPathTop;
+            _aggPathTop = AggregateTime(GetCommutePathTopDistance());
+            _aggPathTopTime = Time.time;
+            return _aggPathTop;
         }
 
         /// <summary>
