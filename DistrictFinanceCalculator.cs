@@ -101,6 +101,8 @@ namespace DistrictFinanceManager
             _cacheTime.Clear();
             _districtGDP = null;
             _districtPop = null;
+            _panelWorkers = null;      _panelWorkersTime = 0f;      // 区域工人数（键 12 第二子模式）
+            _aggPanelWorkers = null;   _aggPanelWorkersTime = 0f;
             _districtArea = null;
             _districtAreaTime = 0f;
             _builtDelta = null;
@@ -109,6 +111,8 @@ namespace DistrictFinanceManager
             _districtBuiltAreaTime = 0f;
             _districtBuiltWeightArea = null;
             _districtBuiltWeightAreaTime = 0f;
+            _basePrim = null;            // 增速基准（跨周 / 换周期 / 改设置都必须重算）
+            _basePrimTime = 0f;
             // ⚠️ 这两个是「清零 + 记时间戳」型缓存，时间戳必须用 -∞ 而不是 0f：
             // 判据是 `Time.time - 时间戳 < CacheLife()`，开局 10 秒内 Time.time < 10，
             // 写成 0f 会让刚清零的值被当成有效缓存返回 0（工业/玩家/服务的 GDP、平均地价一起读 0）。
@@ -118,9 +122,22 @@ namespace DistrictFinanceManager
             _avgLandValueTime = float.NegativeInfinity;
             _districtIncomeNum = null;
             _districtIncomeNumTime = 0f;
+            _commuteCount = null;      _commuteCountTime = 0f;
+            _commuteDist = null;       _commuteDistTime = 0f;
+            _localEmpRate = null;      _localEmpRateTime = 0f;
+            _aggCommuteDist = null;    _aggCommuteDistTime = 0f;
+            _aggLocalEmpRate = null;   _aggLocalEmpRateTime = 0f;
+            _commuteTime = null;       _commuteTimeTime = 0f;
+            _commuteTimeCnt = null;    _commuteTimeCntTime = 0f;
+            _aggCommuteTime = null;    _aggCommuteTimeTime = 0f;
+            _commuteTop = null;        _commuteTopTime = 0f;
+            _aggCommuteTop = null;     _aggCommuteTopTime = 0f;
+            _commuteProg = null;       _commuteProgTime = 0f;
+            _aggCommuteProg = null;    _aggCommuteProgTime = 0f;
             // ⚠️ 以下都是**建筑派生统计**，与设置/权重无关，绝不能在 ClearCache 里清：
             //   _allDensity（密度分桶 + GDP 分子） / _allBuiltCells（建成区） /
-            //   _allBuiltWeightCells（加权建成区） / _allIncome（收入分子）
+            //   _allBuiltWeightCells（加权建成区） / _allIncome（收入分子） /
+            //   _allOd + _allCommuteSum（通勤/本地就业的源数据）
             // 原因：**每次跨游戏周** Hub.Update 都会先 ClearCache 再采样，清掉的话要等
             // 下一轮建筑遍历跑完（UpdateInterval×3 秒）才有值 ——
             //   · 清 _allIncome    → 人均可支配一整轮读作 0
@@ -138,6 +155,11 @@ namespace DistrictFinanceManager
         private float _districtGDPTime;
         private long[] _districtPop;
         private float _districtPopTime;
+        // 「区域工人数」（键 12 的第二个子模式，2026-09-28）：自身 / 聚合两份，缓存口径与 _districtPop 一致。
+        private double[] _panelWorkers;
+        private float _panelWorkersTime;
+        private double[] _aggPanelWorkers;
+        private float _aggPanelWorkersTime;
         private double[] _districtArea;
         private float _districtAreaTime;
         private double[] _builtDelta;         // 建成区价值增量缓存（每区划）
@@ -564,6 +586,319 @@ namespace DistrictFinanceManager
                 return ModSettings.PeriodWeeks(hub.Settings.DisplayPeriod);
             return 1;
         }
+
+        #region 增速（与「建筑价值增量」同一个滚动窗口）
+
+        // 增速的**原始量**（自身值口径）。周库里只有这 6 个量，其余指标全部由它们相除得到：
+        //   人均GDP = GDP/人口、地均GDP = GDP/面积、人口密度 = 人口/面积。
+        private const int GP_GDP = 0, GP_POP = 1, GP_LAND = 2, GP_AREA = 3, GP_BUILT = 4, GP_INC = 5;
+        // GP_WORKERS（2026-09-28）：键 12 第二个子模式「区域工人数」的增速基准列（周库 PanelWorkers 列）。
+        private const int GP_WORKERS = 6;
+        private const int GP_COUNT = 7;
+
+        private double[][] _basePrim;   // [原始量][区划ID] 基准周的值（只存自身值，聚合用时现算）
+        private float _basePrimTime;
+
+        /// <summary>
+        /// 该排序键有没有「增速」口径。**键值与面板 DistrictFinancePanel 的 _sortKey 一一对应**，改一边必须改另一边：
+        ///   0=GDP 1=人口 2=人均GDP 3=地价 4=地均GDP 5=人口密度 6=面积 8=建成区面积 9=人均可支配 → 有
+        ///   7=建筑价值增量 10=自定义政府投资额 → **没有**：这两个本身就是「一段时间内的增量 / 累计量」，
+        ///   再算增速等于对增量再求一次比值，没有意义（面板侧遇到它们就保持原口径，见 SortValue）。
+        /// </summary>
+        public static bool GrowthSupported(int key)
+        {
+            // ⚠️ 键 12 是**子模式感知**的：只有「区域工人数」能算增速（走周库 v8 的 PanelWorkers 列）；
+            //    「本地就业率」是个比值，没有增速。所以面板侧还必须再判一次子模式
+            //    （见面板的 EmployGrowthSupported / GrowthForCurrentKey），这里只表达"键 12 有这个能力"。
+            return key == 0 || key == 1 || key == 2 || key == 3
+                || key == 4 || key == 5 || key == 6 || key == 8 || key == 9
+                || key == 12;
+        }
+
+        /// <summary>
+        /// 增速（%，按周期）。`aggregate=false` 用自身值，`true` 用「自身 + 全部下辖」的聚合值。
+        /// **不支持的键返回 null**（调用方据此退回原口径）。
+        ///
+        /// 口径与「建筑价值增量」逐字一致：当前值用**实时数据**（处在当前周的下一周），
+        /// 基准值取周库里 ≤(当前周 + 1 − N) 的最近**有效**周，N = 当前周期周数（周 1 / 月 4 / 季 13 / 年 52 / 5年 260）；
+        /// 不足一个周期才退回「最早的**有效**周」（初值）。有效 = 该值 &gt; 0（0 表示那周还没读到数据）。
+        /// 基准 ≤ 0 → 该区划记 0（除不出增速）。
+        /// ⚠️ 这条兜底对**比值**很敏感（新区划会算出 +1000%；窗口跨过 GDP 公式改动的老周会假性 −100%），
+        ///    但用户 2026-09-27 明确要求**保留**（与增量口径一致）—— 排查手法见 EnsureBasePrim 的注释。
+        ///
+        /// ⚠️ 增速是**比值**，货币系数与周期周数在分子分母里约掉了 —— 「人民币/年」与「原版/周」下
+        /// 同一个区划的增速**完全相同**，只有**窗口 N** 随周期变。这是它与「增量」最大的区别
+        /// （增量随货币和周期一起缩放，增速只随周期变窗口）。
+        /// </summary>
+        public double[] GetGrowth(int key, bool aggregate)
+        {
+            double[] live, basev;
+            if (!GrowthRaw(key, aggregate, out live, out basev)) return null;
+            // 排查用：把「实时值 / 基准值 / 结果」按区划打几行（「显示调试信息」打开时每秒最多一次）。
+            // 增速的换算全在 GrowthRaw 里，出问题只可能是这三个数之一不对 —— 打出来就能直接对账。
+            DistrictFinanceHub logHub = DistrictFinanceHub.Instance;
+            if (logHub != null && logHub.Settings != null && logHub.Settings.ShowDebug)
+                LogGrowthSample(key, aggregate, live, basev);
+            double[] r = new double[256];
+            for (int i = 1; i < 256; i++)
+            {
+                if (basev[i] <= 0.0) continue;   // 基准无效 → 0（不能除）
+                r[i] = (live[i] - basev[i]) / basev[i] * 100.0;
+            }
+            return r;
+        }
+
+        /// <summary>
+        /// 增速用的「实时值 / 基准值」两个**自身值**数组（都是排序键口径的同一个量）。
+        /// 组合视图要按成员先求和再算增速（不能对成员的增速求平均），所以除了比值还要拿到这两列，故单独开放。
+        /// 不支持的键 → 返回 false，两个 out 均为 null。
+        /// </summary>
+        public bool GrowthRaw(int key, bool aggregate, out double[] live, out double[] basev)
+        {
+            live = null; basev = null;
+            if (!GrowthSupported(key)) return false;
+
+            // ---- 实时值：聚合口径直接调 GetAggregateXxx（未入层级的区划 = 自身值）----
+            // ⚠️ GDP 是**唯一带显示系数**的量：实时端 `CalcGDP` 乘了 `GetDisplayFactor()`（货币 × 周期），
+            //    而周库里一律存**原始值**（入库时除回了系数，见 DistrictSeriesDB 顶部的「存储口径」）。
+            //    所以基准那一路要**现乘**当前系数，两端才同口径（下面 bGdp 那一行）。
+            //    这个系数在比值里会约掉 → 增速与货币、周期都无关，只有窗口 N 随周期变。
+            double[] lGdp = aggregate ? GetAggregateGDP() : GetDistrictGDP();
+            double[] lPop = ToD(aggregate ? GetAggregatePopulation() : GetDistrictPopulation());
+            double[] lLand = aggregate ? GetAggregateLandValue() : ToD(GetDistrictLandValue());
+            double[] lArea = aggregate ? GetAggregateArea() : GetDistrictArea();
+            double[] lBuilt = aggregate ? GetAggregateBuiltArea() : GetDistrictBuiltArea();
+            double[] lInc = aggregate ? GetAggregateDisposableIncome() : GetDistrictDisposableIncome();
+            // 键 12 第二子模式：区域工人数（原版区划面板口径，纯读游戏数据；基准 = 周库 v8 的 PanelWorkers 列）
+            double[] lWorkers = aggregate ? GetAggregatePanelWorkers() : GetDistrictPanelWorkers();
+
+            // ---- 基准值：周库里的原始量（自身），聚合口径再按子树累加 / 面积加权 ----
+            // GDP 那一列要乘回当前显示系数（库是原始值、实时端带系数，见上面的说明）。
+            // 先聚合再乘：两个操作都是线性的，谁先谁后一样，但放在聚合后只需乘一次。
+            double[] bGdp = Mul(aggregate ? AggPrim(GP_GDP) : BasePrim(GP_GDP), GetDisplayFactor());
+            double[] bPop = aggregate ? AggPrim(GP_POP) : BasePrim(GP_POP);
+            double[] bArea = aggregate ? AggPrim(GP_AREA) : BasePrim(GP_AREA);
+            double[] bBuilt = aggregate ? AggPrim(GP_BUILT) : BasePrim(GP_BUILT);
+            // 地价：聚合是**面积加权平均**而不是求和，必须用基准周的地价+面积重新加权（见 AggLandWeighted）
+            double[] bLand = aggregate
+                ? AggLandWeighted(BasePrim(GP_LAND), BasePrim(GP_AREA))
+                : BasePrim(GP_LAND);
+            // 人均可支配：周库存的是**人均**，聚合却必须是 Σ分子 ÷ Σ人口 ——
+            // 分子 = 人均 × 人口（两列周库里都有），先还原成分子再聚合（与 GetAggregateDisposableIncome 同口径）
+            double[] bInc = Div(aggregate ? AggPrim(GP_INC) : BasePrim(GP_INC), bPop);
+            double[] bWorkers = aggregate ? AggPrim(GP_WORKERS) : BasePrim(GP_WORKERS);
+
+            switch (key)
+            {
+                case 0: live = lGdp; basev = bGdp; break;
+                case 1: live = lPop; basev = bPop; break;
+                case 2: live = Div(lGdp, lPop); basev = Div(bGdp, bPop); break;        // 人均GDP
+                case 3: live = lLand; basev = bLand; break;                            // 地价
+                case 4: live = Div(lGdp, lArea); basev = Div(bGdp, bArea); break;      // 地均GDP
+                case 5: live = Div(Mul(lPop, 1000000.0), lArea);                       // 人口密度（人/km²）
+                        basev = Div(Mul(bPop, 1000000.0), bArea); break;
+                case 6: live = lArea; basev = bArea; break;
+                case 8: live = lBuilt; basev = bBuilt; break;
+                case 9: live = lInc; basev = bInc; break;
+                case 12: live = lWorkers; basev = bWorkers; break;   // 区域工人数（面板侧只在工人子模式下调用）
+                default: return false;
+            }
+            return live != null && basev != null;
+        }
+
+        /// <summary>
+        /// 基准原始量的聚合（自身 + 全部下辖，递归 —— 与 GetAggregateXxx 同一套子树求和）。
+        /// 用 ComputeAggregate 而不是 AccumArea：两者都是后序求和，但前者与 GDP/人口 的聚合口径一致。
+        /// </summary>
+        private double[] AggPrim(int p)
+        {
+            double[] self = BasePrim(p);
+            // 与对应的 GetAggregateXxx **逐一对齐**（现有 getter 的口径本来就不统一，照抄各自的约定）：
+            //   GDP / 人口 / 收入分子 → 未入层级的区划记 0（GetAggregateGDP/Population 就是全 0 起步）；
+            //   面积 / 建成区面积     → 未入层级保留**自身值**（GetAggregateArea/BuiltArea 是全量拷贝起步）。
+            // 弄反了会给「没入层级」的区划算出假 −100%（实时 0 ÷ 基准 非 0）。
+            bool zeroIfUnassigned = (p == GP_GDP || p == GP_POP || p == GP_INC || p == GP_WORKERS);
+            double[] agg = new double[256];
+            if (!zeroIfUnassigned)
+                for (int i = 0; i < 256; i++) agg[i] = self[i];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Hierarchy == null) return agg;
+            double[] sum = new double[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                ComputeAggregate(root, self, sum, hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited)) agg[id] = sum[id];
+            return agg;
+        }
+
+        /// <summary>
+        /// 面积加权平均地价的聚合，但输入可以换成**基准周**的地价与面积
+        /// （＝ GetAggregateLandValue 的口径，只是两端都用基准值 —— 否则会算成「聚合地价 vs 基准周自身地价」）。
+        /// </summary>
+        private double[] AggLandWeighted(double[] landSelf, double[] areaSelf)
+        {
+            double[] agg = new double[256];
+            if (landSelf == null) return agg;
+            for (int i = 0; i < 256; i++) agg[i] = landSelf[i];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Hierarchy == null || areaSelf == null) return agg;
+            double[] lsum = new double[256], wsum = new double[256];
+            var visited = new HashSet<ushort>();
+            foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                AccumLand(root, landSelf, areaSelf, lsum, wsum, hub.Hierarchy, visited);
+            foreach (ushort id in new List<ushort>(visited))
+                agg[id] = wsum[id] > 0 ? lsum[id] / wsum[id] : landSelf[id];
+            return agg;
+        }
+
+        /// <summary>基准周上某原始量的**自身**值数组（无数据 = 0）。</summary>
+        private double[] BasePrim(int p)
+        {
+            EnsureBasePrim();
+            if (_basePrim == null || p < 0 || p >= _basePrim.Length) return new double[256];
+            return _basePrim[p];
+        }
+
+        /// <summary>
+        /// 算出「基准原始量」：每个区划、每个原始量各自取周库里 ≤(当前周 + 1 − N) 的最近**有效**周的值；
+        /// 不足一个周期才退回最早的**有效**周（**兜底**，与 GetDistrictBuiltValueDelta 同一套规则，用户要求保留）。
+        /// **逐列各自回退**：某列的 0 只是「那周这一列还没读到数据」，不该拖累其它列。
+        /// GDP 那一列额外只认「与最新一周同一统计模式段」的周（见下面的段说明）。
+        /// 结果按 CacheLife 缓存（只有开「增速」时才会被调用）。
+        /// </summary>
+        private void EnsureBasePrim()
+        {
+            if (_basePrim != null && Time.time - _basePrimTime < CacheLife()) return;
+            double[][] r = new double[GP_COUNT][];
+            for (int p = 0; p < GP_COUNT; p++) r[p] = new double[256];
+            try
+            {
+                DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+                DistrictSeriesDB series = hub != null ? hub.Series : null;
+                if (series != null && series.HasAny)
+                {
+                    int n = PeriodWeeksForCalc();
+                    // 锚点必须是【当前游戏周】而不是周库最新周：回档后周库里会残留未来时间线的周，
+                    // 用最新周会把基准取到未来去（与增量踩过的坑同一个，见 GetDistrictBuiltValueDelta）。
+                    long target = (long)GameWeek.CurrentWeek + 1 - n;
+                    int iGdp = SeriesFieldIndex("GDP");
+                    int iPop = SeriesFieldIndex("Population");
+                    int iLand = SeriesFieldIndex("LandValue");
+                    int iArea = SeriesFieldIndex("Area");
+                    int iBuilt = SeriesFieldIndex("BuiltArea");
+                    int iInc = SeriesFieldIndex("DisposableIncome");
+                    int iWorkers = SeriesFieldIndex("PanelWorkers");   // v8 追加列（区域工人数）
+
+                    for (ushort id = 1; id < 256; id++)
+                    {
+                        List<uint> ws = series.SeriesWeeks(id);
+                        if (ws.Count == 0) continue;
+
+                        // 注：GDP 那一列的「老数据带统计模式系数」问题不在这里兜 ——
+                        // 读周库时已经做过一次性迁移（v4 及以前清零 / v5 除回原始值，见
+                        // DistrictSeriesStore 的 GdpWipeVersion、ConvertGdpToRaw），
+                        // 之后库里一直是原始值，显示系数由 GrowthRaw 现乘，所以这里按普通列处理即可，
+                        // 不需要「模式段」判定。
+                        double[] lastV = new double[GP_COUNT];   // ≤target 的最近有效值
+                        double[] firstV = new double[GP_COUNT];  // 最早的有效值（不足一个周期时兜底）
+                        bool[] haveLast = new bool[GP_COUNT];
+                        bool[] haveFirst = new bool[GP_COUNT];
+
+                        for (int wi = 0; wi < ws.Count; wi++)    // ws 升序
+                        {
+                            uint w = ws[wi];
+                            double[] row;
+                            if (!series.TryGetRow(id, w, out row)) continue;
+                            double pop = RowVal(row, iPop);
+                            for (int p = 0; p < GP_COUNT; p++)
+                            {
+                                double v;
+                                switch (p)
+                                {
+                                    case GP_GDP: v = RowVal(row, iGdp); break;
+                                    case GP_POP: v = pop; break;
+                                    case GP_LAND: v = RowVal(row, iLand); break;
+                                    case GP_AREA: v = RowVal(row, iArea); break;
+                                    case GP_BUILT: v = RowVal(row, iBuilt); break;
+                                    case GP_WORKERS: v = RowVal(row, iWorkers); break;
+                                    default: v = pop * RowVal(row, iInc); break; // 收入**分子** = 人均 × 人口
+                                }
+                                if (v <= 0.0) continue;              // 0 = 那周还没读到数据，跳过
+                                if (!haveFirst[p]) { firstV[p] = v; haveFirst[p] = true; }
+                                if ((long)w <= target) { lastV[p] = v; haveLast[p] = true; }
+                            }
+                        }
+                        // 兜底：历史不足一个周期时用「最早的**有效**周」（与增量同一套规则）。
+                        // ⚠️ 用户 2026-09-27 明确要求**保留**这个兜底，所以别再"顺手删掉"。
+                        //    代价记在这里备查：增速是**比值**，拿很早的周当基数会放大得很厉害 ——
+                        //      · 新建区划只有几周历史 → 分母是"刚建出来"那点值 → 动辄 +1000%；
+                        //      · 窗口跨过 2026-09-18 的 GDP 公式改动 → 老周存的是旧公式的值（大几十~上千倍），
+                        //        比值会假性接近 −100%（或反向爆表）。
+                        //    真出现「异常大值」时先用 `[DFM] 增速 N=… 实时=… 基准=… → …%` 那几行对账（见 LogGrowthSample）。
+                        for (int p = 0; p < GP_COUNT; p++)
+                            r[p][id] = haveLast[p] ? lastV[p] : (haveFirst[p] ? firstV[p] : 0.0);
+                    }
+                }
+            }
+            catch (System.Exception ex) { Debug.LogWarning("[DFM] Growth base failed: " + ex.Message); }
+            _basePrim = r;
+            _basePrimTime = Time.time;
+        }
+
+        /// <summary>取周库行里的第 idx 列（越界/缺列返回 0 —— 老档没有的列自动当 0，即被当成无效基准跳过）。</summary>
+        private static double RowVal(double[] row, int idx)
+        {
+            if (row == null || idx < 0 || idx >= row.Length) return 0.0;
+            return row[idx];
+        }
+
+        private static double[] ToD(long[] a)
+        {
+            double[] r = new double[256];
+            if (a != null) for (int i = 0; i < 256 && i < a.Length; i++) r[i] = a[i];
+            return r;
+        }
+
+        private static double[] Mul(double[] a, double f)
+        {
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++) r[i] = a[i] * f;
+            return r;
+        }
+
+        /// <summary>
+        /// 调试用：把增速的「实时值 / 基准值 → 结果%」打几行日志（每秒最多一次，最多 5 个有基准的区划）。
+        /// 只在「显示调试信息」打开时调用。排查口径问题时看这三列一眼就知道是哪一端不对。
+        /// </summary>
+        private static float _growthLogTime;
+        private static void LogGrowthSample(int key, bool aggregate, double[] live, double[] basev)
+        {
+            if (Time.time - _growthLogTime < 1f) return;
+            _growthLogTime = Time.time;
+            int n = PeriodWeeksForCalc();
+            int shown = 0;
+            for (int id = 1; id < 256 && shown < 5; id++)
+            {
+                if (basev[id] <= 0.0) continue;
+                shown++;
+                double pct = (live[id] - basev[id]) / basev[id] * 100.0;
+                Debug.Log("[DFM] 增速 N=" + n + "周 key=" + key + (aggregate ? " 聚合" : " 自身")
+                    + " #" + id + " 实时=" + live[id].ToString("0.###")
+                    + " 基准=" + basev[id].ToString("0.###")
+                    + " → " + pct.ToString("0.00") + "%");
+            }
+        }
+
+        /// <summary>逐元素相除；分母 ≤ 0 时记 0（＝「这个区划算不出这个比值」，增速也随之记 0）。</summary>
+        private static double[] Div(double[] num, double[] den)
+        {
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++)
+                r[i] = (den != null && i < den.Length && den[i] > 0.0) ? num[i] / den[i] : 0.0;
+            return r;
+        }
+
+        #endregion
 
 /// <summary>所有原版区划的居民数（按区划ID索引），直接读游戏数据，用于人口排序。</summary>
         public long[] GetDistrictPopulation()
@@ -1058,6 +1393,59 @@ namespace DistrictFinanceManager
         private Dictionary<ushort, double> _allBuiltWeightCells;
         private Dictionary<ushort, double> _builtWeightPartial;
 
+        // ================= 通勤距离 / 本地就业（**居住地口径**，2026-09-27 新增）=================
+        // 基数 = 就业市民，与「人均可支配收入」的分子**完全是同一批人**（见 AccumWages）：
+        //   m_workBuilding 指向的工作建筑属于 IsIncomeWorkplace，且居住地在某个区划内。
+        // 两个源数组都由建筑分片遍历顺带累加、每轮（UpdateInterval×3 秒）重建并引用交换发布。
+        /// <summary>
+        /// OD 人数矩阵：下标 `[居住区划 * 256 + 工作区划]`。
+        /// 工作区划 = 0 表示工作地在未分配区域（**照样进分母**，但 0 不是任何区划 → 永远不算「本地就业」）。
+        /// 派生：行和 = 该区划的就业居民数（分母）；对角元 od[h*256+h] = 在本区划就业的人数。
+        /// </summary>
+        private int[] _allOd;
+        private int[] _odPartial;
+        /// <summary>按居住区划的通勤距离之和（**米**）—— 除以该区划就业居民数 = 平均通勤距离。</summary>
+        private double[] _allCommuteSum;
+        private double[] _commuteSumPartial;
+
+        // 派生缓存：都能由上面两个源数组随时重算，所以 ClearCache 可以清
+        // （⚠️ 源数组 _allOd / _allCommuteSum 与 _allIncome 同列，**绝不能在 ClearCache 里清**）
+        private long[] _commuteCount;      private float _commuteCountTime;
+        private double[] _commuteDist;     private float _commuteDistTime;
+        private double[] _localEmpRate;    private float _localEmpRateTime;
+        private double[] _aggCommuteDist;  private float _aggCommuteDistTime;
+        private double[] _aggLocalEmpRate; private float _aggLocalEmpRateTime;
+
+        // ---- 通勤时间（2026-09-27 新增）：与上面两项同源同口径（居住地归集、同一批人），只是量换成「时间」----
+        // 源数据不是数组，而是**每区划一个 FIFO 样本缓冲**（`CommuteSamples[] _samples`，见下方跟踪器那段）：
+        // 一趟通勤结算后按居住区划压进去，留存的样本不清零（满了才淘汰最早的），均值由 getter 现算。
+        private double[] _commuteTime;      private float _commuteTimeTime;
+        private long[] _commuteTimeCnt;     private float _commuteTimeCntTime;
+        private double[] _aggCommuteTime;   private float _aggCommuteTimeTime;
+        // 「最长 10%」口径（面板第三个按钮）：每区划取**最大的 10% 样本**求平均（至少 1 趟）。
+        // 与均值是**两套并列的派生缓存**，互不覆盖 —— 周库入库永远记均值（见 Hub.SampleWeek），
+        // 这一套只是显示/排名口径（用户 2026-09-27 加）。开关本身放在**面板**（`_commuteTopMode`）。
+        private double[] _commuteTop;       private float _commuteTopTime;
+        private double[] _aggCommuteTop;    private float _aggCommuteTopTime;
+        // 「统计进度」百分比（0~100，-1 = 没有就业居民/不适用）：面板给**白色 0**那一行后面注明
+        // 「已统计 x%」用（用户 2026-09-27）。= 已留存趟数 ÷ 显示门槛（就业居民数÷8）。
+        private double[] _commuteProg;      private float _commuteProgTime;
+        private double[] _aggCommuteProg;   private float _aggCommuteProgTime;
+
+        /// <summary>
+        /// 显示口径（用户 2026-09-27 定）：**60 模拟帧 = 10 秒** ⇒ 1 帧 = 1/6 秒。
+        /// 也就是「模拟速率 6 帧/秒」下的**现实等效时间** —— 通勤时长按模拟帧数算，不经过游戏日历。
+        ///
+        /// ⚠️ 2026-09-27 改过一次，别改回去：早先那版用**游戏日历**换算（`m_timePerFrame` = 147.65625 秒/帧，
+        /// 4096 帧 = 7 个日历日，已用用户存档实测确认），一路上算出来一趟通勤是「几小时」，
+        /// 还得再编一个 ÷10 的刻度去压。问题在于**游戏有两套钟且相差 112 倍**：
+        ///   · 日历钟（日期）：147.65625 游戏秒/帧；
+        ///   · 昼夜钟（HUD 的时:分，`DAYTIME_FRAMES = 65536`）：1.3184 游戏秒/帧。
+        /// 市民出行的时间感受跟的是**昼夜钟**（作息按它走），所以通勤时长应当直接从模拟帧出，
+        /// 不要再乘日历系数 —— 用户给的 60 帧 = 10 秒 就是这条。
+        /// </summary>
+        private const double REAL_SECONDS_PER_FRAME = 10.0 / 60.0;
+
         /// <summary>
         /// 「建筑价值增量」的面积权重：不同用途的地均价值差异很大，按类别加权。
         /// 低密住宅 0.5 / 高密住宅 1 / 低密商业 2 / 高密商业 4 / 办公 4 / 玩家建筑 3 / 工业 1.5 /
@@ -1222,6 +1610,10 @@ namespace DistrictFinanceManager
                     _builtWeightPartial = new Dictionary<ushort, double>();
                     _incomePartial = new Dictionary<ushort, IncomeData>();
                     _landValuePartial = new Dictionary<ushort, int>();   // 地价 memo 随每轮重建
+                    _odPartial = new int[256 * 256];                     // 通勤 OD（居住地口径）
+                    _commuteSumPartial = new double[256];
+                    _watchPartial = new List<uint>();                    // 通勤监视名单（第三版）
+                    _watchHomePartial = new List<byte>();
                     _densityBuilding = true;
                 }
 
@@ -1244,6 +1636,9 @@ namespace DistrictFinanceManager
                     _allBuiltCells = _builtCellsPartial;
                     _allBuiltWeightCells = _builtWeightPartial;
                     _allIncome = _incomePartial;
+                    _allOd = _odPartial;
+                    _allCommuteSum = _commuteSumPartial;
+                    PublishCommuteWatch();                                // 名单随本轮一起发布（见第三版注释）
                     _densityBuilding = false;
                 }
             }
@@ -1525,9 +1920,1004 @@ namespace DistrictFinanceManager
                     inc.WageNum += wage;
                     inc.Workers++;
                     _incomePartial[hd] = inc;
+
+                    // ---- 通勤距离 / 本地就业（居住地口径，2026-09-27 新增）----
+                    // 与上面那笔工资**同一批人**（在岗 + 居住地在区划内），只是再记两件事：
+                    //   ① 住址 ↔ 工作地的**直线**距离（取两栋建筑的中心点；世界单位就是米，一格 8 m）；
+                    //   ② OD 对（居住区划 → 工作区划）：行和 = 就业居民数（分母），对角元 = 本地就业人数。
+                    // 学生不是就业：**既带学生标志、又在教育建筑里**才排除（双条件 —— 只排除真正的在读学生，
+                    // 教师等在教育建筑上班的人照常计入；沿用 IsServiceWorkplace「宁可多算不漏算」的原则）。
+                    if (_odPartial != null
+                        && !((c.m_flags & Citizen.Flags.Student) != 0
+                             && svc == ItemClass.Service.Education))
+                    {
+                        _odPartial[hd * 256 + workDistrict]++;
+                        _commuteSumPartial[hd] +=
+                            Vector3.Distance(bbuf[home].m_position, b.m_position);
+                        // 监视名单（第三版）：**就是这批人**（在岗 + 居住地在区划内 + 不是学生），
+                        // 之后只盯他们自己的 CurrentLocation 变化来量通勤时长（见 PollCommuteWatch）
+                        // —— 用户 2026-09-27 的主意：「从工作地点的 income 逆向识别」。
+                        if (_watchPartial != null)
+                        {
+                            _watchPartial.Add(cid);
+                            _watchHomePartial.Add(hd);
+                        }
+                    }
                 }
                 unit = u.m_nextUnit;
             }
+        }
+
+        // ================= 通勤时间：**监视名单轮询**（2026-09-27 第三版）=================
+        // 演进史（别回退）：
+        //   第一版只读「当前那一段」的路径（`PathUnit.m_length ÷ m_speed`）→ 对公交换乘者是错的：
+        //     只采到走到车站那段、乘车段采不到、**候车/换乘的等待根本不在任何路径里**。
+        //   第二版扫**实例缓冲 + 车辆缓冲**、按「源=家 + 终点=单位」登记 → 仍有两类硬伤：
+        //     · **开车的人在车里没有 CitizenInstance**，只能靠车的 source/target 认；而 CS1 的**停车位是
+        //       prop、没有 Parking 这个服务**，车还能开到车站换乘 → 终点判据稍一收紧就把自驾整批漏掉
+        //       （用户 2026-09-27：「有可能是停车地点，还有车站也有很多种，都考虑了吗」）；
+        //     · 每帧扫 ~2200 个实例 + 全部车辆，实测 **5~6 ms/帧**（约占 60 fps 一帧预算的三分之一）。
+        //   第三版（当前）＝**轮询监视名单**（用户 2026-09-27 的主意：「从工作地点的 income 逆向识别」）：
+        //     · 名单来源 = **收入口径那一遍扫描**（`AccumWages`：遍历每栋**工作建筑**的 `m_citizenUnits`
+        //       —— 本来就是「全部就业居民 + 其居住区划」，与人均可支配 / OD 的分子**完全同一批人**）；
+        //     · 之后只盯这些人**自己的** `Citizen.CurrentLocation`：
+        //         上次看到还在**家**、这次不在家也不在单位 → **出发**（记出发帧）；
+        //         在途 → 变成 `Work` = **到单位**（时长 = 到达帧 − 出发帧，压进区划 FIFO）；
+        //                变回 `Home` = 半路回家（丢弃）；太久没到（`COMMUTE_TRIP_MAX_FRAMES`）= 丢弃（不记账）。
+        //     · **完全不看**实例 / 车辆 / 路径 / 站台 / 停车位 —— 人走路、开车、公交地铁、在哪换乘、
+        //       在哪停车都无所谓，量的是「这个人从家到单位花了多少帧」，换乘/候车/最后一段步行天然全含。
+        //     · 代价 = 每 `COMMUTE_POLL_FRAMES` 帧遍历一次名单（几万次数组读）→ 比第二版低两个数量级。
+        // 数值不用「发布」：一次结算就 `PushCommuteSample` 进区划 FIFO（见 `CommuteSamples`），getter 现算。
+
+        /// <summary>
+        /// 是否正在统计（用户 2026-09-27：**只有点了「开始」才统计**，默认关闭）。
+        /// 「停止」会丢掉**还没跟踪完**的在途行程（不完整的记录不进统计），已统计出来的数值保留显示。
+        /// </summary>
+        private bool _commuteRunning;
+        private uint _tripPollFrame;       // 上次轮询监视名单的帧号
+
+        // ---- 监视名单（由收入扫描每轮重建，见 PublishCommuteWatch）----
+        /// <summary>名单：在岗 + 居住地在区划内 + 不是学生的市民 ID（与 OD 分子同一批人）。</summary>
+        private uint[] _watch;
+        private byte[] _watchHome;         // 与 _watch 同序：各自的居住区划
+        private int _watchCount;
+        private List<uint> _watchPartial;      // 本轮扫描正在收集的（扫完发布）
+        private List<byte> _watchHomePartial;
+        /// <summary>按市民 ID 记「这一趟的出发帧」（0 = 没在跟踪）与上一次看到的位置。</summary>
+        private uint[] _tripStart;
+        private byte[] _lastLoc;
+        /// <summary>哪些 ID 在名单里（1 在 / 0 不在；发布时用 2 当临时戳记）。</summary>
+        private byte[] _watched;
+        /// <summary>
+        /// 每区划的样本环形缓冲（FIFO）。容量 = max(1, 就业居民数 ÷ `COMMUTE_CAP_PER_RESIDENT`(=2))，
+        /// 满了之后**淘汰最早**的一趟再放新的（用户 2026-09-27：「这些样本数据要留存，直到样本达到
+        /// 1/2 再刷最早的数据」）。不到上限就一直留着 —— 不按天滚动、不清零。
+        /// 均值 = Sum / Count；**显示**门槛是另一条（÷8，见 CommuteSamplesEnough）。
+        /// </summary>
+        private class CommuteSamples
+        {
+            public double[] Buf;   // 环形缓冲
+            public int Count;      // 已有样本数（≤ Buf.Length）
+            public int Head;       // 下一个写入位置
+            public double Sum;     // 缓冲内之和
+        }
+        private readonly CommuteSamples[] _samples = new CommuteSamples[256];
+
+        /// <summary>
+        /// 轮询监视名单的间隔（帧）。**它同时就是时长的量化误差**（出发与到达都是在这一拍才被发现的，
+        /// 一趟最多多算这么多帧）：15 帧 = 0.25 秒 = 显示上 0.04 分钟，对几百帧起步的通勤可以忽略。
+        /// </summary>
+        private const uint COMMUTE_POLL_FRAMES = 15;
+        /// <summary>
+        /// 样本**显示门槛**的分母（用户 2026-09-27 最终定：**1/8**；前一版是 1/4）：
+        /// 样本数 ≥ 就业居民数 ÷ 8（下限 1 趟）才显示，否则记 0（＝面板上的「无数据」：白色、排最后）。
+        /// 分母用 OD 行和（该区划的就业居民数）——本来就在算，不额外统计。
+        /// ⚠️ **必须小于等于留存上限的 ÷2**，否则永远攒不到能显示的量（÷8 < ÷2 ✓）。
+        /// </summary>
+        private const int COMMUTE_SAMPLES_PER_RESIDENT = 8;
+        /// <summary>
+        /// 样本**留存上限**的分母（用户 2026-09-27）：「这些样本数据要留存，直到样本达到 1/2 再刷最早的
+        /// 数据」→ 容量 = max(1, 就业居民数 ÷ 2)，满了再来新样本就淘汰**最早**的一趟（FIFO）。
+        /// ⚠️ 与显示门槛（÷8）不是一回事：到 ÷8 开始显示，到 ÷2 才开始淘汰老样本。
+        /// </summary>
+        private const int COMMUTE_CAP_PER_RESIDENT = 2;
+        /// <summary>
+        /// 存盘时每区划最多写多少个样本（用户 2026-09-27：「样本保存后要留着」）。抓最近这些，
+        /// 免得上万人的区划把 .commute 写太大（128 区划 × 256 × ~8 字节 ≈ 260 KB 上限）。
+        /// </summary>
+        private const int COMMUTE_PERSIST_MAX = 256;
+        /// <summary>
+        /// `.commute` 文件的**口径版本**（写在第一行 `# DFM Commute v2`）。读到更低（或没有）版本 → 整份丢弃：
+        /// v1 是老结算判据（「最后见到帧 − 起始帧」+ 12000 帧硬上限记账）攒出来的样本，整批卡在
+        /// 33.36~33.43 分钟，没有保留价值（见 LoadCommuteSamples）。**只在换算/结算口径再变时才升**。
+        /// </summary>
+        private const int COMMUTE_SAMPLE_VERSION = 2;
+        /// <summary>
+        /// 单趟硬上限（帧）：超过还没到单位就**丢掉这一趟**（不记账），防止迷路/卡住的行程把表撑住。
+        /// ⚠️ **是丢弃，不是按上限记账** —— 老版本按上限记账，结果样本全挤在 33.4 分钟（见上）。
+        /// ⚠️ 2026-09-27 由 12000 → 24000 → **43200**：12000 帧 = 显示 33.33 分钟，而实测有 8% 的样本挤在
+        ///    30~33.3 分钟这一段、还有一小撮被上限**整条丢掉** —— 用户看到的「最长还是 33 分钟左右」
+        ///    就是这个上限在切尾巴（不是真实最长）。用户随后要求**放到 120 分钟**（显示口径：
+        ///    分钟 = 帧 ÷ 360）→ 43200 帧（现实 720 秒）。再长的才当异常行程丢掉。
+        /// ⚠️ 2026-09-28 用户再要求**放到 5 小时** → **108000 帧**（300 分钟 × 360 帧/分钟 = 现实 1800 秒）。
+        ///    配套：档位表 `COMMUTE_TIME_TIERS` 同时拉长到 8…150 分钟（15 档），
+        ///    以及下面 `PollCommuteWatch` 里那条「单趟明显不合理」的兜底（240 → 300 分钟），
+        ///    **三处要一起改**，否则会出现「上限允许 300 分钟、兜底却在 240 分钟把它悄悄丢掉」。
+        ///    注意上限只影响**丢弃**，不影响换算（分钟 = 帧 ÷ 360）。
+        /// </summary>
+        private const uint COMMUTE_TRIP_MAX_FRAMES = 108000;   // 300 分钟（5 小时）× 360 帧/分钟
+
+        // 性能诊断（只在 ShowDebug 下打印）
+        private int _dbgPollFrames;        // 日志窗口内轮询了几次（算每次耗时）
+        private double _dbgTripMs;
+        private float _dbgTripLogTime;
+        // 窗口内结算出来的样本「帧数」分布（用来判断换算合不合理）
+        private int _dbgTripMinFrames = int.MaxValue, _dbgTripMaxFrames, _dbgTripSampleN;
+        private long _dbgTripSumFrames;
+        // 窗口内的「出发 / 到达 / 丢弃」计数（诊断：出发与到达应当同量级）
+        private int _dbgDeparted, _dbgArrived, _dbgDropHome, _dbgDropTimeout;
+        // 位置分布诊断（枚举顺序 = Home,Work,Visit,Moving,Hotel）：用来确认「到单位」到底能不能被观测到
+        private readonly int[] _dbgLoc = new int[8];
+        private long _dbgInFlightFrames; private int _dbgInFlightN;
+        /// <summary>是否正在统计（面板「开始 / 停止」按钮的状态）。默认**停止**，且不保存进设置。</summary>
+        public bool CommuteTracking { get { return _commuteRunning; } }
+
+        /// <summary>
+        /// 游戏是否正在存档 —— 用户 2026-09-27：「默认是停止状态，**每次保存后都要是停止状态**」。
+        /// 判据用游戏自己的存档状态标志 `SavePanel.isSaving`（**静态属性**，手动存 / 快速存 / 自动存都会置位）。
+        /// 取不到（游戏版本差异/被别的 mod 动过）就当没在存档 —— 只影响这条自动停止，不影响统计本身。
+        /// </summary>
+        private static bool GameSaving()
+        {
+            try { return SavePanel.isSaving; }
+            catch { return false; }
+        }
+
+        /// <summary>已留存的通勤趟数合计（面板状态文字用）。</summary>
+        public long CommuteSampleTotal
+        {
+            get
+            {
+                long n = 0;
+                for (int i = 0; i < 256; i++) if (_samples[i] != null) n += _samples[i].Count;
+                return n;
+            }
+        }
+
+        /// <summary>
+        /// 开始统计（用户 2026-09-27 定稿）：**不动已留存的样本**，接着往里面攒
+        /// （「没必要开始就把样本都删了」）。只清在途行程（那些本来就不完整）。
+        /// </summary>
+        public void StartCommuteTracking()
+        {
+            _commuteRunning = true;
+            ClearInFlight();                    // 在途行程是上一轮的半成品，丢掉重来
+            _tripPollFrame = 0;
+            _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
+            _commuteTop = null; _aggCommuteTop = null;
+            _commuteProg = null; _aggCommuteProg = null;
+            Debug.Log("[DFM] 通勤时间统计：开始（保留已留存样本 " + CommuteSampleTotal + " 趟，继续攒）");
+        }
+
+        /// <summary>
+        /// 停止统计（用户 2026-09-27：「停止要停下所有正在跟踪的部分」）：
+        ///   · **立刻停掉每帧的扫描与结算**（`_commuteRunning=false`，TickCommuteTrack 直接返回）；
+        ///   · **丢掉全部在途行程**（还没跟踪完的，一条不留 —— 不完整的记录不进统计）；
+        ///   · 结算间隔复位，下次「开始」立刻重新扫；
+        ///   · 已经**留存**的样本保留（面板继续显示上次的结果），下次点「开始」才会清零重来。
+        /// </summary>
+        public void StopCommuteTracking()
+        {
+            int dropped = InFlightCount();
+            ClearInFlight();                       // 所有在途行程：全停、全丢
+            _commuteRunning = false;
+            _tripPollFrame = 0;
+            _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;   // 派生缓存作废
+            _commuteTop = null; _aggCommuteTop = null;
+            _commuteProg = null; _aggCommuteProg = null;
+            Debug.Log("[DFM] 通勤时间统计：停止（丢弃 " + dropped + " 条在途行程，保留已留存样本 "
+                + CommuteSampleTotal + " 趟）");
+            // 停止是个天然检查点：把留存样本落盘（用户 2026-09-27：「样本保存后要留着」）
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null) hub.MarkDirty();
+        }
+
+        /// <summary>
+        /// 每帧被 Hub.Update 调用（**只在点了「开始」之后**才真的干活）：
+        /// 每 `COMMUTE_POLL_FRAMES` 帧轮询一次监视名单，认出「出发 / 到单位 / 半路回家 / 超时」四种情况。
+        /// 代价与名单长度成正比（几万次数组读），且**只在 ShowDebug 时**才统计耗时。
+        /// </summary>
+        public void TickCommuteTrack()
+        {
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub == null || hub.Settings == null) return;
+            uint frame = GameWeek.CurrentFrame;
+            if (frame == 0) return;
+            if (!_commuteRunning) return;   // 只有点了「开始」才统计（面板上那两个按钮）
+            // 一存档就停（用户要求：每次保存后都要是停止状态）——不想让它在存档后继续吃性能
+            if (GameSaving())
+            {
+                StopCommuteTracking();
+                return;
+            }
+
+            // 帧号倒退 = 换存档 / 重开地图 → 全部重来（在途状态与样本都是上一局的）
+            if (frame < _tripPollFrame)
+            {
+                ClearInFlight();
+                for (int i = 0; i < 256; i++) _samples[i] = null;
+                _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
+                _commuteTop = null; _aggCommuteTop = null;
+                _commuteProg = null; _aggCommuteProg = null;
+                _tripPollFrame = 0;
+                _commuteRunning = false; // 新存档要重新点「开始」（用户 2026-09-27：只有开始时才统计）
+            }
+
+            if (frame - _tripPollFrame < COMMUTE_POLL_FRAMES) return;
+            _tripPollFrame = frame;
+
+            bool debug = hub.Settings.ShowDebug;
+            long t0 = debug ? System.DateTime.Now.Ticks : 0L;
+            int inflight = PollCommuteWatch(frame);
+            if (debug)
+            {
+                _dbgPollFrames++;
+                _dbgTripMs += (System.DateTime.Now.Ticks - t0) / 10000.0;
+                if (Time.time - _dbgTripLogTime >= 5f)
+                {
+                    double avg = _dbgPollFrames > 0 ? _dbgTripMs / _dbgPollFrames : 0.0;
+                    double avgFrames = _dbgTripSampleN > 0 ? (double)_dbgTripSumFrames / _dbgTripSampleN : 0.0;
+                    // 隐含速度：Σ(样本数 × 该区平均通勤距离) ÷ Σ(样本数 × 该区平均时长)（各区均值再按样本数加权，
+                    // 只是个量级校验 —— 用来判断「帧 → 分钟」的换算合不合理：正常应在步行 5 ~ 开车 60 km/h 之间）
+                    // 注意：**直接读样本的 Sum/Count**，不走 GetCommuteTime()（那条带了 ÷8 显示门槛，
+                    // 区划没够门槛时是 0，隐含速度就永远算不出来 —— 校验要的是「所有样本」）。
+                    double sumMin = 0.0, wDist = 0.0;
+                    long nSmp = 0;
+                    double[] cDist = GetCommuteDistance();
+                    for (int i = 1; i < 256; i++)
+                    {
+                        CommuteSamples s = _samples[i];
+                        if (s == null || s.Count == 0) continue;
+                        sumMin += s.Sum; nSmp += s.Count;
+                        wDist += cDist[i] * s.Count;   // 距离口径没门槛（有就业居民就有值）
+                    }
+                    double avgMin = nSmp > 0 ? sumMin / nSmp : 0.0;
+                    string spd = (avgMin > 0.0 && wDist > 0.0)
+                        ? ((wDist / nSmp) / (avgMin / 60.0)).ToString("0.0") + "km/h" : "—";
+                    Debug.Log("[DFM] 通勤跟踪 监视名单=" + _watchCount + " 在途=" + inflight
+                        + " 轮询耗时/次≈" + avg.ToString("0.000") + "ms"
+                        + " | 留存样本=" + CommuteSampleTotal + " 有样本区划=" + CountSampleDistricts()
+                        + " 显示门槛=就业居民数÷" + COMMUTE_SAMPLES_PER_RESIDENT
+                        + " 留存上限=就业居民数÷" + COMMUTE_CAP_PER_RESIDENT
+                        + " | 这次窗口结算=" + _dbgTripSampleN + "趟 均=" + avgFrames.ToString("0") + "帧"
+                        + (_dbgTripSampleN > 0 ? " 范围=" + _dbgTripMinFrames + "~" + _dbgTripMaxFrames + "帧" : "")
+                        + " 隐含速度≈" + spd
+                        + " | 窗口内 出发=" + _dbgDeparted + " 到达=" + _dbgArrived
+                        + " 回家丢弃=" + _dbgDropHome + " 超时丢弃=" + _dbgDropTimeout
+                        + " | 位置分布 家=" + _dbgLoc[0] + " 单位=" + _dbgLoc[1] + " 访问=" + _dbgLoc[2]
+                        + " 在路上=" + _dbgLoc[3] + " 酒店=" + _dbgLoc[4]
+                        + " | 在途平均已跑=" + (_dbgInFlightN > 0 ? _dbgInFlightFrames / _dbgInFlightN : 0) + "帧");
+                    _dbgPollFrames = 0; _dbgTripMs = 0.0;
+                    _dbgTripSampleN = 0; _dbgTripSumFrames = 0L;
+                    _dbgTripMinFrames = int.MaxValue; _dbgTripMaxFrames = 0;
+                    _dbgDeparted = 0; _dbgArrived = 0; _dbgDropHome = 0; _dbgDropTimeout = 0;
+                    for (int d2 = 0; d2 < 8; d2++) _dbgLoc[d2] = 0;
+                    _dbgInFlightFrames = 0L; _dbgInFlightN = 0;
+                    _dbgTripLogTime = Time.time;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 轮询监视名单，返回**在途**（已出发、还没到单位）的趟数。
+        /// 判定只用**这个人自己**的 `Citizen.CurrentLocation`：
+        ///   · 上次看到在**家**、这次不在家也不在单位 → **出发**（记出发帧）；
+        ///   · 在途 → 变成 `Work` = **到单位**（记一趟样本，时长 = 到达帧 − 出发帧）；
+        ///             变回 `Home` = 半路回家（丢弃 —— 不是通勤到岗）；
+        ///             超过 `COMMUTE_TRIP_MAX_FRAMES` 还没到 → 丢弃（异常行程，**不记账**）。
+        /// ⚠️ 「上次看到还在家」这一条不能省：否则「逛完商店直接去上班」会被当成从商店起算的一趟。
+        /// </summary>
+        private int PollCommuteWatch(uint frame)
+        {
+            if (_watch == null || _watchCount == 0) return 0;
+            CitizenManager cm = Singleton<CitizenManager>.instance;
+            if (cm == null) return 0;
+            Citizen[] citizens = cm.m_citizens.m_buffer;
+            uint size = (uint)citizens.Length;
+            if (_tripStart == null || _tripStart.Length < size || _lastLoc == null || _lastLoc.Length < size)
+            {
+                _tripStart = new uint[size];
+                _lastLoc = new byte[size];
+            }
+            long[] emp = null;      // 惰性：真要记账时才取（门槛/容量用）
+            int inflight = 0;
+            for (int k = 0; k < _watchCount; k++)
+            {
+                uint cid = _watch[k];
+                if (cid == 0 || cid >= size) continue;
+                byte loc = (byte)citizens[cid].CurrentLocation;
+                if (loc < 8) _dbgLoc[loc]++;
+                byte last = _lastLoc[cid];
+                _lastLoc[cid] = loc;
+                uint start = _tripStart[cid];
+                if (loc == (byte)Citizen.Location.Work)
+                {
+                    if (start == 0) continue;                  // 本来就在单位：不是一趟
+                    _tripStart[cid] = 0;
+                    _dbgArrived++;
+                    uint elapsed = frame - start;
+                    double minutes = (double)elapsed * REAL_SECONDS_PER_FRAME / 60.0;
+                    if (elapsed == 0 || minutes > 300.0) continue;   // 明显不合理的单趟丢掉（与 COMMUTE_TRIP_MAX_FRAMES = 300 分钟一致）
+                    int hd = _watchHome[k];
+                    if (hd <= 0 || hd >= 256) continue;
+                    if (emp == null) emp = GetCommuteCount();
+                    // 压进该区划的 FIFO（容量按该区划的就业居民数定；满了淘汰最早的一趟）
+                    PushCommuteSample(hd, minutes, emp[hd]);
+                    _dbgTripSampleN++; _dbgTripSumFrames += elapsed;
+                    if ((int)elapsed < _dbgTripMinFrames) _dbgTripMinFrames = (int)elapsed;
+                    if ((int)elapsed > _dbgTripMaxFrames) _dbgTripMaxFrames = (int)elapsed;
+                }
+                else if (loc == (byte)Citizen.Location.Home)
+                {
+                    if (start != 0) { _tripStart[cid] = 0; _dbgDropHome++; }   // 半路回家 → 不是到岗
+                }
+                else
+                {
+                    // 非家非单位 = **在路上**（走路 / 候车 / 车上 / 换乘 / 停车后步行，全在这一类）
+                    if (start == 0)
+                    {
+                        if (last == (byte)Citizen.Location.Home)
+                        {
+                            _tripStart[cid] = frame;   // 刚从家出来 → 出发
+                            _dbgDeparted++;
+                        }
+                    }
+                    else if (frame - start >= COMMUTE_TRIP_MAX_FRAMES)
+                    {
+                        _tripStart[cid] = 0; _dbgDropTimeout++;   // 太久没到 → 丢弃（不记账）
+                    }
+                    else { inflight++; _dbgInFlightFrames += frame - start; _dbgInFlightN++; }
+                }
+            }
+            return inflight;
+        }
+
+        /// <summary>清掉所有「在途」的出发记录（**不动已留存样本**）。</summary>
+        private void ClearInFlight()
+        {
+            if (_tripStart != null) System.Array.Clear(_tripStart, 0, _tripStart.Length);
+            if (_lastLoc != null) System.Array.Clear(_lastLoc, 0, _lastLoc.Length);
+        }
+
+        /// <summary>当前在途（已出发、还没到单位）的趟数。</summary>
+        private int InFlightCount()
+        {
+            if (_watch == null || _tripStart == null) return 0;
+            int n = 0;
+            for (int k = 0; k < _watchCount; k++)
+            {
+                uint cid = _watch[k];
+                if (cid < _tripStart.Length && _tripStart[cid] != 0) n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// 把这一轮收入扫描收集到的**监视名单**发布出去（每轮 ≈ `UpdateInterval×3` 秒一次）。
+        /// 用 `_watched` 当戳记（1 = 在名单里、2 = 本轮新进、0 = 不在）：
+        ///   · 新进的 ID → **清掉状态**（ID 复用、刚入职，旧状态无意义）；
+        ///   · 上一轮有、这一轮没有的 ID（搬走 / 失业 / 换单位）→ **清掉状态**；
+        ///   · 两轮都在的 ID → **保留在途状态**（不打断正在跟踪的趟）。
+        /// </summary>
+        private void PublishCommuteWatch()
+        {
+            if (_watchPartial == null) return;
+            int n = _watchPartial.Count;
+            uint[] nw = n > 0 ? _watchPartial.ToArray() : null;
+            byte[] nh = n > 0 ? _watchHomePartial.ToArray() : null;
+            int size = 0;
+            CitizenManager cm = Singleton<CitizenManager>.instance;
+            if (cm != null) size = cm.m_citizens.m_buffer.Length;
+            if (_tripStart == null || _tripStart.Length < size) { _tripStart = new uint[size]; _lastLoc = new byte[size]; }
+            if (_watched == null || _watched.Length < size) _watched = new byte[size];
+
+            for (int k = 0; k < n; k++)                       // ① 新进的：清状态 + 打戳记 2
+            {
+                uint cid = nw[k];
+                if (cid == 0 || cid >= _watched.Length) continue;
+                if (_watched[cid] == 0) { _tripStart[cid] = 0; _lastLoc[cid] = 0; }
+                _watched[cid] = 2;
+            }
+            for (int k = 0; k < _watchCount; k++)             // ② 退出的：清状态 + 归零
+            {
+                uint cid = _watch[k];
+                if (cid == 0 || cid >= _watched.Length) continue;
+                if (_watched[cid] != 2) { _watched[cid] = 0; _tripStart[cid] = 0; _lastLoc[cid] = 0; }
+            }
+            for (int k = 0; k < n; k++)                       // ③ 收尾：戳记 2 → 1
+            {
+                uint cid = nw[k];
+                if (cid != 0 && cid < _watched.Length) _watched[cid] = 1;
+            }
+            _watch = nw; _watchHome = nh; _watchCount = n;
+        }
+
+        // ================= 通勤距离 / 本地就业（居住地口径）— 只读接口 =================
+        // 两个源数组（_allOd / _allCommuteSum）在建筑分片遍历里累加，这里只做派生。
+        // 口径：**按「住在本单元的人」归集**（居住地口径，用户 2026-09-27 定）；
+        // 聚合/组合统一放宽为「工作地落在范围内**任一个**成员区划内」就算本地就业。
+
+        /// <summary>每区划的**就业居民数**（按居住地归集）= OD 行和。既是分母，也是聚合时的权重。</summary>
+        public long[] GetCommuteCount()
+        {
+            if (_commuteCount != null && Time.time - _commuteCountTime < CacheLife())
+                return _commuteCount;
+            long[] r = new long[256];
+            int[] od = _allOd;
+            if (od != null)
+                for (int h = 1; h < 256; h++)
+                {
+                    int b = h * 256;
+                    long n = 0;
+                    for (int w = 0; w < 256; w++) n += od[b + w];
+                    r[h] = n;
+                }
+            _commuteCount = r;
+            _commuteCountTime = Time.time;
+            return r;
+        }
+
+        /// <summary>按居住区划的通勤距离之和（米）。只在内部给加权平均用，不对外暴露米制。</summary>
+        private double[] GetCommuteSumRaw()
+        {
+            return _allCommuteSum != null ? _allCommuteSum : new double[256];
+        }
+
+        /// <summary>
+        /// 平均通勤距离（**km**，居住地口径）= 本区划就业居民的通勤距离和 ÷ 本区划就业居民数。
+        /// 没有就业居民 → 0（面板显示 0.00 km）。
+        /// </summary>
+        public double[] GetCommuteDistance()
+        {
+            if (_commuteDist != null && Time.time - _commuteDistTime < CacheLife())
+                return _commuteDist;
+            double[] sum = GetCommuteSumRaw();
+            long[] cnt = GetCommuteCount();
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++)
+                r[i] = cnt[i] > 0 ? sum[i] / cnt[i] / 1000.0 : 0.0;   // 米 → km
+            _commuteDist = r;
+            _commuteDistTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 本地就业率（%，居住地口径）= 工作地也在**本区划**的就业居民 ÷ 本区划就业居民。
+        /// 单区划没有「跨成员」可言，就是 OD 对角元；聚合/组合见 GetAggregateLocalEmploymentRate。
+        /// </summary>
+        public double[] GetLocalEmploymentRate()
+        {
+            if (_localEmpRate != null && Time.time - _localEmpRateTime < CacheLife())
+                return _localEmpRate;
+            double[] r = new double[256];
+            int[] od = _allOd;
+            if (od != null)
+            {
+                long[] cnt = GetCommuteCount();
+                for (int h = 1; h < 256; h++)
+                    r[h] = cnt[h] > 0 ? (double)od[h * 256 + h] / cnt[h] * 100.0 : 0.0;
+            }
+            _localEmpRate = r;
+            _localEmpRateTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 聚合平均通勤距离（km）= **Σ子树内所有就业居民的距离 ÷ Σ子树内就业居民数** ——
+        /// 权重天然就是就业居民数（用户要的「按人口加权」），**不能对子节点的平均值再求平均**。
+        /// 结构与 GetAggregateDisposableIncome 一致（未入层级的区划为 0）。
+        /// </summary>
+        public double[] GetAggregateCommuteDistance()
+        {
+            if (_aggCommuteDist != null && Time.time - _aggCommuteDistTime < CacheLife())
+                return _aggCommuteDist;
+            double[] dist = GetCommuteDistance();
+            long[] cnt = GetCommuteCount();
+            double[] wsum = new double[256];   // 距离 × 人数（可加的加权量）
+            long[] selfCnt = new long[256];
+            for (int i = 0; i < 256; i++) { wsum[i] = dist[i] * cnt[i]; selfCnt[i] = cnt[i]; }
+
+            double[] aggW = new double[256];
+            long[] aggC = new long[256];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Hierarchy != null)
+            {
+                // 两趟各用**独立的** visited：HashSet 兼作跨根去重，复用会让第二趟直接读回 0
+                var v1 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, wsum, aggW, hub.Hierarchy, v1);
+                var v2 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, selfCnt, aggC, hub.Hierarchy, v2);
+            }
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++) r[i] = aggC[i] > 0 ? aggW[i] / aggC[i] : 0.0;
+            _aggCommuteDist = r;
+            _aggCommuteDistTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 聚合本地就业率（%）= **居住地与工作地都落在子树内**的就业居民 ÷ 子树内就业居民。
+        /// 与单区划的「工作地 == 本区划」不同：子树内跨成员上班也算本地
+        /// （用户 2026-09-27 定的聚合规则，组合视图同规则）。
+        /// </summary>
+        public double[] GetAggregateLocalEmploymentRate()
+        {
+            if (_aggLocalEmpRate != null && Time.time - _aggLocalEmpRateTime < CacheLife())
+                return _aggLocalEmpRate;
+            double[] r = new double[256];
+            int[] od = _allOd;
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (od != null && hub != null && hub.Hierarchy != null)
+            {
+                long[] cnt = GetCommuteCount();
+                bool[] member = new bool[256];   // 复用同一张成员表（每个节点进来先清空）
+                var visited = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    AccumLocalEmp(root, od, cnt, member, r, hub.Hierarchy, visited);
+            }
+            _aggLocalEmpRate = r;
+            _aggLocalEmpRateTime = Time.time;
+            return r;
+        }
+
+        // ================== 「区域工人数」（2026-09-28，键 12 的第二个子模式）==================
+        // 口径 = **原版区划面板那一格**（用户 2026-09-28：「直接读取区域面板数据」）。
+        // 反汇编 DistrictWorldInfoPanel.UpdateBindings 核实：面板的 m_WorkersAmount 用
+        // DISTRICT_COUNTFORMAT 填两个数 ——
+        //   · 在岗人数 = 商业 / 工业 / 办公 / 玩家产业四处 `m_finalAliveCount` 之和；
+        //   · 岗位容量 = 同四处的 `m_finalHomeOrWorkCount` 之和。
+        // 本模组取**在岗人数**（用户 2026-09-28 选定：「实际在岗人数」）。
+        // ⚠️ 与原版一致：**不含公共服务建筑的职工**（那四个桶里没有公共服务这一项），
+        //    所以它与 `FinanceResult.Workers`（额外加了建筑遍历数出来的 ServiceWorkers）**不是同一个数**——
+        //    要跟原版区划面板对得上就用这一个。纯读游戏数据、不做任何遍历。
+
+        /// <summary>各区划的**区域工人数**（自身值，原版区划面板口径）。</summary>
+        public double[] GetDistrictPanelWorkers()
+        {
+            if (_panelWorkers != null && Time.time - _panelWorkersTime < CacheLife())
+                return _panelWorkers;
+            double[] r = new double[256];
+            try
+            {
+                DistrictManager dm = Singleton<DistrictManager>.instance;
+                if (dm != null)
+                {
+                    District[] buf = dm.m_districts.m_buffer;
+                    uint size = dm.m_districts.m_size;
+                    if (buf != null)
+                    {
+                        uint scan = size < (uint)buf.Length ? size : (uint)buf.Length;
+                        for (uint d = 1; d < scan; d++)
+                            if ((buf[d].m_flags & District.Flags.Created) != 0)
+                                r[d] = GetWorkers(buf[d]);
+                    }
+                }
+            }
+            catch { }
+            _panelWorkers = r;
+            _panelWorkersTime = Time.time;
+            return r;
+        }
+
+        /// <summary>区域工人数的**聚合**（自身 + 全部下辖，子树求和）。未入层级的区划记 0
+        /// —— 与 人口 / GDP 的聚合一致（见 AggPrim 里 zeroIfUnassigned 的说明：弄反会算出假 −100%）。</summary>
+        public double[] GetAggregatePanelWorkers()
+        {
+            if (_aggPanelWorkers != null && Time.time - _aggPanelWorkersTime < CacheLife())
+                return _aggPanelWorkers;
+            double[] self = GetDistrictPanelWorkers();
+            double[] agg = new double[256];
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Hierarchy != null)
+            {
+                double[] sum = new double[256];
+                var visited = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, self, sum, hub.Hierarchy, visited);
+                foreach (ushort id in new List<ushort>(visited)) agg[id] = sum[id];
+            }
+            _aggPanelWorkers = agg;
+            _aggPanelWorkersTime = Time.time;
+            return agg;
+        }
+
+        /// <summary>
+        /// 后序算「聚合本地就业率」：先标记本节点的子树成员，再 Σ_{h,w ∈ 子树} od[h][w] ÷ Σ_{h ∈ 子树} 行和。
+        /// 规模 = 节点数 × 成员数²（上限约 128 × 128² ≈ 2 M 次数组读），每 CacheLife 只算一次，可接受。
+        /// </summary>
+        private static void AccumLocalEmp(ushort d, int[] od, long[] cnt, bool[] member, double[] rate,
+            DistrictHierarchy h, HashSet<ushort> visited)
+        {
+            if (!visited.Add(d)) return;   // 防环（与 ComputeAggregate 同一套）
+            for (int i = 0; i < 256; i++) member[i] = false;
+            MarkSubtree(d, member, h, new HashSet<ushort>());
+            double inside = 0.0;   // 子树内的 OD 对和（居住与工作都在子树内）
+            long total = 0;        // 子树内的就业居民数
+            for (int hi = 1; hi < 256; hi++)
+            {
+                if (!member[hi]) continue;
+                total += cnt[hi];
+                int b = hi * 256;
+                for (int wi = 1; wi < 256; wi++)
+                    if (member[wi]) inside += od[b + wi];
+            }
+            rate[d] = total > 0 ? inside / total * 100.0 : 0.0;
+            foreach (ushort child in h.GetChildren(d))
+                AccumLocalEmp(child, od, cnt, member, rate, h, visited);
+        }
+
+        /// <summary>把 d 及其全部下辖在 member 表上标记（防环用独立的 visited）。</summary>
+        private static void MarkSubtree(ushort d, bool[] member, DistrictHierarchy h, HashSet<ushort> visited)
+        {
+            if (!visited.Add(d)) return;
+            member[d] = true;
+            foreach (ushort child in h.GetChildren(d))
+                MarkSubtree(child, member, h, visited);
+        }
+
+        // ================= 通勤时间（居住地口径，仅本段用得到 PathUnit / CitizenInstance）=================
+        // 数据来源（2026-09-27 用 dnfile 核实过字段）：市民/车辆**正在走的那条路径**存着
+        //   `PathUnit.m_length`（米）与 `PathUnit.m_speed` → 帧数 = 长度 ÷ 速度；再按 REAL_SECONDS_PER_FRAME 换算成分钟。
+        // 认「这一趟是不是通勤」用 `CitizenInstance` / `Vehicle` 的 `m_sourceBuilding` / `m_targetBuilding`：
+        //   一头是住宅（家）、另一头是工作建筑 → 就是通勤，且**整趟时长**都在路径里（不用从头跟到尾）。
+        // 归集与另两项一致：**按居住地所在区划**累加。
+
+        /// <summary>
+        /// 这一单元攒的样本够不够显示：**样本数 ≥ 就业居民数 ÷ 4**（下限 1 趟），不够记 0
+        /// （＝面板上的「无数据」：白色、排最后）。**这是唯一的门槛**（用户 2026-09-27：
+        /// 「36000 的限制不要了，就用样本量限制」）。
+        /// </summary>
+        /// <summary>该区划的**显示门槛**：就业居民数 ÷ 8（下限 1 趟）。判定与「统计进度」共用它。</summary>
+        public static long CommuteNeed(long employedResidents)
+        {
+            long need = employedResidents / COMMUTE_SAMPLES_PER_RESIDENT;
+            return need < 1 ? 1 : need;
+        }
+
+        /// <summary>样本数够不够显示（不够＝面板上的白色 0「无数据」）。</summary>
+        public static bool CommuteSamplesEnough(long samples, long employedResidents)
+        {
+            return samples >= CommuteNeed(employedResidents);
+        }
+
+        /// <summary>
+        /// 把留存的通勤样本序列化成文本（每区划一行 `D &lt;id&gt; &lt;count&gt; &lt;v...&gt;`，只写每区划**最近**的
+        /// `COMMUTE_PERSIST_MAX` 个，把文件大小按住）。由 Hub 存盘时调用，见 `DistrictDataStore.SaveCommuteSamples`。
+        /// </summary>
+        public string DumpCommuteSamples()
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append("# DFM Commute v").Append(COMMUTE_SAMPLE_VERSION).Append('\n');
+            for (int i = 1; i < 256; i++)
+            {
+                CommuteSamples smp = _samples[i];
+                if (smp == null || smp.Count == 0 || smp.Buf == null) continue;
+                int n = smp.Count;
+                int start = (smp.Count == smp.Buf.Length) ? smp.Head : 0;
+                int keep = n > COMMUTE_PERSIST_MAX ? COMMUTE_PERSIST_MAX : n;
+                sb.Append("D ").Append(i).Append(' ').Append(keep);
+                for (int k = n - keep; k < n; k++)
+                    sb.Append(' ').Append(smp.Buf[(start + k) % smp.Buf.Length]
+                        .ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+                sb.Append('\n');
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 读回通勤样本（Hub 读档时调用）。坏行/坏数一律跳过；恢复出来的样本按时间顺序进缓冲，
+        /// 之后照常按容量淘汰。**不清空已发布结果**（下次 getter 现算）。
+        ///
+        /// ⚠️ **一次性作废旧口径样本**：老文件（没有版本头）里存的是「最后见到帧 − 起始帧」量出来的时长，
+        /// 而那一版几乎整批卡在 12000 帧的硬上限上（实测全是 33.36~33.43 分钟）。结算判据改成
+        /// 「到没到单位」之后这些值全无意义，且会继续被平均进去 → 读到老格式一律丢弃，重新攒。
+        /// 版本头由 `DumpCommuteSamples` 写在第一行。
+        /// </summary>
+        public void LoadCommuteSamples(string[] lines)
+        {
+            if (lines == null) return;
+            int fileVer = 0;
+            for (int li = 0; li < lines.Length; li++)
+            {
+                string h = lines[li];
+                if (h == null) continue;
+                h = h.Trim();
+                if (h.Length == 0) continue;
+                if (h[0] != '#') break;                       // 头只可能在最前面
+                if (h.StartsWith("# DFM Commute v"))
+                {
+                    int v;
+                    if (int.TryParse(h.Substring(15), System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out v)) fileVer = v;
+                }
+            }
+            if (fileVer < COMMUTE_SAMPLE_VERSION)
+            {
+                if (lines.Length > 0)
+                    Debug.Log("[DFM] 通勤样本：旧口径（v" + fileVer + " < v" + COMMUTE_SAMPLE_VERSION +
+                              "，那批时长卡在硬上限上）→ 全部丢弃，重新攒");
+                return;
+            }
+            int ok = 0;
+            for (int li = 0; li < lines.Length; li++)
+            {
+                string t = lines[li];
+                if (t == null) continue;
+                t = t.Trim();
+                if (t.Length == 0 || t[0] == '#') continue;
+                string[] parts = t.Split(' ');
+                if (parts.Length < 3 || parts[0] != "D") continue;
+                int id, count;
+                if (!int.TryParse(parts[1], System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out id)) continue;
+                if (!int.TryParse(parts[2], System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out count)) continue;
+                if (id <= 0 || id >= 256 || count <= 0) continue;
+                int avail = parts.Length - 3;
+                int n = count < avail ? count : avail;
+                if (n <= 0) continue;
+                CommuteSamples smp = new CommuteSamples();
+                smp.Buf = new double[n];
+                smp.Count = n; smp.Head = 0; smp.Sum = 0.0;
+                bool bad = false;
+                for (int k = 0; k < n; k++)
+                {
+                    double v;
+                    if (!double.TryParse(parts[3 + k], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out v)) { bad = true; break; }
+                    smp.Buf[k] = v; smp.Sum += v;
+                }
+                if (bad) continue;
+                _samples[id] = smp;
+                ok++;
+            }
+            _commuteTime = null; _commuteTimeCnt = null; _aggCommuteTime = null;
+            _commuteTop = null; _aggCommuteTop = null;
+            _commuteProg = null; _aggCommuteProg = null;
+            Debug.Log("[DFM] 通勤样本：读回 " + ok + " 个区划（" + CommuteSampleTotal + " 趟）");
+        }
+
+        /// <summary>有样本的区划数（调试日志用）。</summary>
+        private int CountSampleDistricts()
+        {
+            int n = 0;
+            for (int i = 0; i < 256; i++) if (_samples[i] != null && _samples[i].Count > 0) n++;
+            return n;
+        }
+
+        /// <summary>
+        /// 把一趟样本放进该区划的环形缓冲：没满就追加；满了就**淘汰最早**的一趟再放新的（FIFO）。
+        /// 容量 = max(1, 就业居民数 ÷ `COMMUTE_CAP_PER_RESIDENT`)。人变多导致容量变大时会扩容
+        /// （按时间顺序把老样本搬到新缓冲）。
+        /// </summary>
+        private void PushCommuteSample(int hd, double minutes, long employedResidents)
+        {
+            if (hd <= 0 || hd >= 256) return;
+            CommuteSamples smp = _samples[hd];
+            if (smp == null) { smp = new CommuteSamples(); _samples[hd] = smp; }
+            int cap = (int)(employedResidents / COMMUTE_CAP_PER_RESIDENT);
+            if (cap < 1) cap = 1;
+            if (smp.Buf == null || smp.Buf.Length < cap)
+            {
+                double[] nb = new double[cap];
+                int n = smp.Count;
+                int start = (smp.Buf != null && smp.Count == smp.Buf.Length) ? smp.Head : 0;
+                for (int i = 0; i < n; i++) nb[i] = smp.Buf[(start + i) % smp.Buf.Length];
+                smp.Buf = nb; smp.Head = n % cap; smp.Count = n;
+            }
+            if (smp.Count < smp.Buf.Length)
+            {
+                smp.Buf[smp.Head] = minutes;
+                smp.Count++;
+                smp.Sum += minutes;
+            }
+            else
+            {
+                smp.Sum -= smp.Buf[smp.Head];   // 淘汰最早的那一趟
+                smp.Buf[smp.Head] = minutes;
+                smp.Sum += minutes;
+            }
+            smp.Head = (smp.Head + 1) % smp.Buf.Length;
+        }
+
+        /// <summary>
+        /// 平均通勤时间（**分钟，现实等效**，居住地口径）= 本区划**留存样本**的平均（见 `CommuteSamples`）。
+        /// 时间换算：帧 × 10 ÷ 60 ÷ 60（即 60 模拟帧 = 10 秒）。样本不够门槛 / 没有样本 → 0。
+        /// </summary>
+        public double[] GetCommuteTime()
+        {
+            if (_commuteTime != null && Time.time - _commuteTimeTime < CacheLife()) return _commuteTime;
+            double[] r = new double[256];
+            long[] emp = GetCommuteCount();   // 该区划的就业居民数（显示门槛 = 它 ÷ 4）
+            for (int i = 1; i < 256; i++)
+            {
+                CommuteSamples smp = _samples[i];
+                if (smp == null || smp.Count == 0) continue;
+                if (CommuteSamplesEnough(smp.Count, emp[i])) r[i] = smp.Sum / smp.Count;
+            }
+            _commuteTime = r;
+            _commuteTimeTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 「最长 10%」口径（用户 2026-09-27 加，面板第三个按钮「最长10%」）：
+        /// 每区划取**留存样本里最大的 10%**（`Count ÷ 10`，至少 1 趟）求平均 ——
+        /// 也就是把「这一带最堵/最远的那批通勤」抬出来看，均值会被大量短途稀释掉。
+        /// 门槛与均值口径**同一条**（样本数 ≥ 就业居民数 ÷ 8，见 CommuteSamplesEnough）；不足 → 0。
+        /// 实现：把该区划的环形缓冲摊平到一个临时数组，`Array.Sort` 升序后取尾部 k 个（k = 10%）。
+        /// 代价 = 每区划一次 O(n log n)（n ≤ 就业居民数÷2），且只在缓存过期（CacheLife）时才算一次；
+        /// 区划数 ≤ 128、n 通常几十到几千 → 可接受。
+        /// </summary>
+        public double[] GetCommuteTopTime()
+        {
+            if (_commuteTop != null && Time.time - _commuteTopTime < CacheLife()) return _commuteTop;
+            double[] r = new double[256];
+            long[] emp = GetCommuteCount();
+            for (int i = 1; i < 256; i++)
+            {
+                CommuteSamples smp = _samples[i];
+                if (smp == null || smp.Count == 0 || smp.Buf == null) continue;
+                if (!CommuteSamplesEnough(smp.Count, emp[i])) continue;
+                // 摊平成连续数组（环形缓冲的先后顺序对「取最大 k 个」没有意义，照搬 Dump 的取数方式）
+                double[] tmp = new double[smp.Count];
+                int start = (smp.Count == smp.Buf.Length) ? smp.Head : 0;
+                for (int k = 0; k < smp.Count; k++) tmp[k] = smp.Buf[(start + k) % smp.Buf.Length];
+                System.Array.Sort(tmp);   // 文件里没 using System，写全名（与 System.DateTime 同一套路）
+                int take = smp.Count / 10;
+                if (take < 1) take = 1;
+                double s = 0.0;
+                for (int k = smp.Count - take; k < smp.Count; k++) s += tmp[k];
+                r[i] = s / take;
+            }
+            _commuteTop = r;
+            _commuteTopTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 「统计进度」百分比（0~100；**-1 = 不适用**）：该区划**已留存趟数 ÷ 显示门槛**（就业居民数÷8）。
+        /// 面板在**白色 0（＝还没到门槛）**那一行的数值后面注明它（用户 2026-09-27：「在白色状态的后面
+        /// 注明已统计的百分比」），让人知道还要等多久；过了门槛就是 100（那时显示的是数值，不再注）。
+        /// </summary>
+        public double[] GetCommuteProgress()
+        {
+            if (_commuteProg != null && Time.time - _commuteProgTime < CacheLife()) return _commuteProg;
+            double[] r = new double[256];
+            long[] emp = GetCommuteCount();
+            for (int i = 1; i < 256; i++)
+            {
+                if (emp[i] <= 0) { r[i] = -1.0; continue; }      // 没有就业居民 → 这一项对它不适用
+                CommuteSamples smp = _samples[i];
+                long have = smp != null ? smp.Count : 0;
+                long need = CommuteNeed(emp[i]);
+                r[i] = have >= need ? 100.0 : (double)have * 100.0 / need;
+            }
+            _commuteProg = r;
+            _commuteProgTime = Time.time;
+            return r;
+        }
+
+        /// <summary>每区划留存的通勤趟数（聚合加权用）。</summary>
+        public long[] GetCommuteTimeCount()
+        {
+            if (_commuteTimeCnt != null && Time.time - _commuteTimeCntTime < CacheLife()) return _commuteTimeCnt;
+            long[] r = new long[256];
+            for (int i = 0; i < 256; i++) if (_samples[i] != null) r[i] = _samples[i].Count;
+            _commuteTimeCnt = r;
+            _commuteTimeCntTime = Time.time;
+            return r;
+        }
+
+        /// <summary>聚合平均通勤时间（分钟）= Σ子树(时长×趟数) ÷ Σ子树趟数 —— 与通勤距离同一套加权。</summary>
+        public double[] GetAggregateCommuteTime()
+        {
+            if (_aggCommuteTime != null && Time.time - _aggCommuteTimeTime < CacheLife()) return _aggCommuteTime;
+            _aggCommuteTime = AggregateTime(GetCommuteTime());
+            _aggCommuteTimeTime = Time.time;
+            return _aggCommuteTime;
+        }
+
+        /// <summary>
+        /// 聚合「最长 10%」通勤时间（分钟）：**Σ子树(各区划的 10% 分位值 × 该区划趟数) ÷ Σ子树趟数**。
+        /// 与均值口径**同一套加权**（`AggregateTime`），只是把「各区划的值」换成 10% 分位值。
+        /// 口径说明：这里**不是**「把所有成员的样本倒在一起再取前 10%」（那需要把子树里几万条样本
+        /// 汇总排序，每帧/每次刷新都要做，代价不可接受）；而是「各成员先取自己的 10% 分位，再按趟数加权」。
+        /// 两者在成员分布相近时几乎一样，成员之间差别大时前者会更极端一点 —— 用户 2026-09-27 要的是
+        /// 「样本各区中前 10% 大的数据」，逐区取分位再加权正是这个说法。
+        /// </summary>
+        public double[] GetAggregateCommuteTopTime()
+        {
+            if (_aggCommuteTop != null && Time.time - _aggCommuteTopTime < CacheLife()) return _aggCommuteTop;
+            _aggCommuteTop = AggregateTime(GetCommuteTopTime());
+            _aggCommuteTopTime = Time.time;
+            return _aggCommuteTop;
+        }
+
+        /// <summary>
+        /// 聚合「统计进度」百分比（子树口径；-1 = 不适用）：**子树样本数 ÷ 子树门槛**（子树就业居民数÷8）。
+        /// 与 `GetCommuteProgress` 同一套算法，只是两端的数都换成子树的和（同样走后序求和）。
+        /// </summary>
+        public double[] GetAggregateCommuteProgress()
+        {
+            if (_aggCommuteProg != null && Time.time - _aggCommuteProgTime < CacheLife()) return _aggCommuteProg;
+            long[] selfCnt = GetCommuteTimeCount();
+            long[] aggC = new long[256];
+            long[] aggEmp = new long[256];
+            long[] empSelf = GetCommuteCount();
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Hierarchy != null)
+            {
+                var v1 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, selfCnt, aggC, hub.Hierarchy, v1);
+                var v2 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, empSelf, aggEmp, hub.Hierarchy, v2);
+            }
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++)
+            {
+                if (aggEmp[i] <= 0) { r[i] = -1.0; continue; }
+                long need = CommuteNeed(aggEmp[i]);
+                r[i] = aggC[i] >= need ? 100.0 : (double)aggC[i] * 100.0 / need;
+            }
+            _aggCommuteProg = r;
+            _aggCommuteProgTime = Time.time;
+            return r;
+        }
+
+        /// <summary>
+        /// 「各区划一个值 × 该区划趟数」沿层级后序求和再取比值（聚合与组合共用同一套加权逻辑）。
+        /// 门槛同样是 and 条件：子树样本数 ≥ 子树就业居民数 ÷ 8，否则 0。
+        /// </summary>
+        private double[] AggregateTime(double[] valPerDistrict)
+        {
+            long[] cnt = GetCommuteTimeCount();
+            double[] wsum = new double[256];
+            long[] selfCnt = new long[256];
+            for (int i = 0; i < 256; i++) { wsum[i] = valPerDistrict[i] * cnt[i]; selfCnt[i] = cnt[i]; }
+            double[] aggW = new double[256];
+            long[] aggC = new long[256];
+            long[] aggEmp = new long[256];      // 子树内的就业居民数（门槛 = 它 ÷ 8）
+            long[] empSelf = GetCommuteCount();
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            if (hub != null && hub.Hierarchy != null)
+            {
+                var v1 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, wsum, aggW, hub.Hierarchy, v1);
+                var v2 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, selfCnt, aggC, hub.Hierarchy, v2);
+                var v3 = new HashSet<ushort>();
+                foreach (ushort root in hub.Hierarchy.GetRootNodes())
+                    ComputeAggregate(root, empSelf, aggEmp, hub.Hierarchy, v3);
+            }
+            double[] r = new double[256];
+            for (int i = 0; i < 256; i++)
+                r[i] = CommuteSamplesEnough(aggC[i], aggEmp[i]) ? aggW[i] / aggC[i] : 0.0;   // 同样 and 条件
+            return r;
+        }
+
+        /// <summary>OD 人数（居住区划 home → 工作区划 work）。组合视图做「成员集内」求和用。</summary>
+        public long GetOdCount(ushort home, ushort work)
+        {
+            int[] od = _allOd;
+            if (od == null || home >= 256 || work >= 256) return 0;
+            return od[home * 256 + work];
         }
 
         /// <summary>生态子服务映射回对应的普通子服务（游戏税率表里没有 eco 项）。</summary>

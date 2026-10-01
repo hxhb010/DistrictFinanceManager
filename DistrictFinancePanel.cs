@@ -64,6 +64,11 @@ namespace DistrictFinanceManager
         private static readonly long[] POP_TIERS =
             { 100, 250, 500, 1000, 2000, 4000, 8000, 15000, 25000, 40000, 60000, 90000, 130000, 170000, 200000 };
 
+        // 「区域工人数」分档阈值（15 个）—— 用户 2026-09-28：「图例按照人口图例的一半设置」，
+        // 即 POP_TIERS ÷ 2（工人数本来就在人口的一半量级：一个区划的岗位数 ≈ 常住人口的一半）。
+        // 与货币/周期无关（人口档位也不随模式变）。**必须在 POP_TIERS 之后声明**。
+        private static readonly double[] WORKERS_TIERS = HalfTiersD(POP_TIERS);
+
         // 地价分档阈值（15 个，对应 16 档颜色）—— 每 8 一档（原版 kr/m² 基准）
         private static readonly long[] LAND_TIERS =
             { 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120 };
@@ -88,6 +93,30 @@ namespace DistrictFinanceManager
         // **只换阈值，颜色阶梯仍是同一套 TIER_COLORS**。（必须在 AREA_TIERS 之后声明）
         private static readonly double[] BUILT_AREA_TIERS = ScaledTiers(AREA_TIERS, 0.75);
 
+        // 平均通勤距离分档阈值（15 档，单位 km）—— 住址↔工作地的**直线**距离。
+        // 用户 2026-09-27 定：主区间就压在 **1~10 km**（一格 8 m，跨区通勤多在这个量级），
+        // 两端各留一点余量（<1 km 的近距离、>10 km 的远距离照样分得出来，再极端就顶到首尾档）。
+        // ⚠️ 取色是**反向**的（越近越好，见 CommuteColor / 图例的 invert），档位表本身仍升序。
+        // 与货币/统计周期**无关**，直接就用，不需要 GetXxxDisplayTiers 包装。
+        private static readonly double[] COMMUTE_TIERS =
+            { 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 9.5, 11.0, 13.0 };
+
+        // 本地就业率分档阈值（15 档，单位 %）—— 本区划就业居民中工作地也在本单元的比例。
+        // 用户 2026-09-27 定：**0~100 平均排**（16 档等分 100%，这里取整到整数档位）。
+        private static readonly double[] LOCAL_EMP_TIERS =
+            { 7, 13, 20, 27, 33, 40, 47, 53, 60, 67, 73, 80, 87, 93, 100 };
+
+        // 平均通勤时间分档阈值（15 档，单位**分钟**）—— 换算见计算器的 REAL_SECONDS_PER_FRAME（60 模拟帧 = 10 秒）。
+        // 按「10~20 分钟最常见、40 分钟以上算远」划，与通勤距离档位基本同量级（1 km ≈ 1.5 分钟）。
+        // ⚠️ 用户 2026-09-27 明确要求**不要缩小这张表**（保持 3~85 分钟这套）。
+        // ⚠️ 与通勤距离一样**越短越好 → 反向取色**（图例必须 invert:true）。
+        /// <summary>通勤时间档位（分钟，15 档递增）。
+        /// 2026-09-28 用户定稿：**8 12 16 20 24 28 32 36 40 45 50 60 80 110 150**
+        /// （配合「单趟上限放到 5 小时」，原来那套 3…85 分钟的表留不住长尾）。
+        /// 与 `CommuteTimeColor`（越短越好 → 反向取色）、图例 `invert: true` 是**同一张表**，改这里就行。</summary>
+        private static readonly double[] COMMUTE_TIME_TIERS =
+            { 8, 12, 16, 20, 24, 28, 32, 36, 40, 45, 50, 60, 80, 110, 150 };
+
         /// <summary>把一张分档表整体缩放（不能用 Linq，写显式循环）。</summary>
         private static double[] ScaledTiers(double[] src, double f)
         {
@@ -104,20 +133,45 @@ namespace DistrictFinanceManager
             return r;
         }
 
-        // 建成区价值增量分档阈值（15 个，对应 16 档颜色）—— 以 0 为中心的发散档（kr 基准，周）。
-        // 索引 0–5 为负、索引 6 转正 → **0 落在黄色档 TIER_COLORS[6]（金黄）**；
-        // 负值→红端(0..5)、正值→绿紫端(7..15)。随 货币(LandMult) × 周期(周/年) 缩放。
-        // 增量分档阈值（15 个，对应 16 档颜色）—— 以 0 为中心的发散档（kr 基准，周）。
+        /// <summary>double[] 版减半（区域工人数 = 人口档位 ÷ 2；要 double[] 才能与就业率的档位共用
+        /// DrawLegend 的重载 —— long[] 与 double[] 在三元表达式里没有公共类型，会编译不过）。</summary>
+        private static double[] HalfTiersD(long[] src)
+        {
+            double[] r = new double[src.Length];
+            for (int i = 0; i < src.Length; i++) r[i] = src[i] * 0.5;
+            return r;
+        }
+
+        // 建筑价值增量 / 自定义政府投资额 的**发散档位**（15 个，对应 16 档颜色；基准 = 原版 kr、周）。
         // 索引 0–5 为负、索引 6 = [-10k, +10k) 含 0 → **0 落在黄色档 TIER_COLORS[6]（金黄）**；
-        // 负值→红端(0..5)、正值→绿紫端(7..15)。随 货币(LandMult) × 周期(周=1/年=52) 缩放。
-        // 档位是**手调**的（不套严格公式）：最低变色档 10k，之后按 ~2.2 倍递增（递增比率参照 GDP_TIERS）；
-        // 负值区间比正值放宽得多 —— 缩水/拆除的幅度可以很大，值得多留几档。
-        // 手调的基准档位（最低变色档 10k，之后约 ×2.2 递增），整体再乘 DELTA_TIER_SCALE。
-        private static readonly double[] BUILT_DELTA_BASE_TIERS =
-            { -1500000, -450000, -150000, -60000, -25000, -10000,
-               10000, 25000, 60000, 140000, 320000, 700000, 1500000, 3000000, 6000000 };
-        private const double DELTA_TIER_SCALE = 1.5;
-        private static readonly double[] BUILT_DELTA_TIERS = ScaledTiers(BUILT_DELTA_BASE_TIERS, DELTA_TIER_SCALE);
+        // 负值→红端(0..5)、正值→绿紫端(7..15)。
+        //
+        // ⚠️ **最大值 15,000,000 = GDP 表最大值(45,000,000) 的 1/3**（用户 2026-09-28 要求：
+        //    「自定义投资额和建筑价值增量的图例修一下，保证最大值为 gdp 图例的 1/3，其他值和负值你自己合理分配」）。
+        //    注意：本图例的**换算系数仍是价格系数**（与地价同源，见 GetBuiltDeltaDisplayTiers），
+        //    GDP 图例用的是流量系数，两者差 6.25~8.3 倍 → **只有"原版 + 周"这一档比值正好是 1/3**；
+        //    人民币/美元下比值随系数走（用户 2026-09-28 明确选了这个口径：
+        //    「地价视图的比例是不一样的」—— 增量由地价派生，必须留在地价那套系数里）。
+        //
+        // 档距（沿用用户原来那套手调思路，只把量级对齐到 15M）：
+        //   · 正向 8 档 ~2.5 倍递增：10k → 15M（1万 / 2.5万 / 6万 / 15万 / 40万 / 100万 / 250万 / 600万 / 1500万）；
+        //   · 负向 5 档更宽（~3 倍）：-10k → -300万 —— 缩水/拆除的幅度可以很大，多留几档位；
+        //   · ±10k 以内算"没动"，落在金黄档（原来是 ±15k，跟着整体量级一起收）。
+        private static readonly double[] BUILT_DELTA_TIERS =
+            { -3000000, -1000000, -300000, -100000, -30000, -10000,
+               10000, 25000, 60000, 150000, 400000, 1000000, 2500000, 6000000, 15000000 };
+
+        // 「增速」分档阈值（15 个，对应 16 档颜色）—— 用户 2026-09-27 指定，**单位是「年」**（年图例）。
+        // 档位 = 该值起（标签是各档**下限**）：<-10 / −10 / −5 / −2 / −1 / +0.5 / +1 / +2 / +4 / +6 /
+        //   +9 / +12 / +16 / +20 / +25 / ≥+30。
+        // 特点：**0 附近分得很细**（−1% ~ +0.5% 是一档），负值只有 4 档（缩水方向粗）；
+        //   因此 "0" 落在 TIER_COLORS[4]（橙黄）而不是正中间的金黄 —— 这是刻意的档距取舍，不是错位。
+        // ⚠️ 实际用的是 GetGrowthDisplayTiers()：把这**年**档位按当前周期换算（周 ÷52、月 ×4/52…）。
+        // ⚠️ 这一张是**所有排序键共用**的：增速是比值，量纲上各键可比。
+        //   代价是量级不同（面积增速常常是 0，GDP 增速动辄几十个百分点），若某个键看着「全挤在一档」，
+        //   就是档位不合身 —— 到时候再按键拆成各自的表（目前先共用一张，保持跨键可比）。
+        private static readonly double[] GROWTH_TIERS =
+            { -10, -5, -2, -1, 0.5, 1, 2, 4, 6, 9, 12, 16, 20, 25, 30 };
 
         // 人均可支配收入分档阈值（15 个，对应 16 档颜色）—— = 人均GDP 档位 ÷ 2。
         // 两者都是「人均货币值」，可支配收入是本区划居民的实际到手收入，量级约为人均GDP 的一半。
@@ -173,8 +227,41 @@ namespace DistrictFinanceManager
         private UILabel _nameTitleLb;
         private UILabel _nameHintLb;
         private int _sortKey; // 0=GDP 1=人口 2=人均GDP 3=地价 4=地均GDP 5=人口密度 6=面积 7=建筑价值增量 8=建成区面积 9=人均可支配
+                              // 10=自定义政府投资额 11=平均通勤距离(km) 12=就业相关 13=平均通勤时间(分钟)
+                              // ⚠️ 12 是**双子口径**的键（2026-09-28）：`_employWorkers` 决定显示
+                              //    「本地就业率(%)」还是「区域工人数(人)」——取值/取色/格式化/图例/占比/增速
+                              //    四处都要跟着切（统一走 SelfEmployValues / AggEmployValues / EmployModeName /
+                              //    EmployGrowthSupported / GrowthActive）。键名（下拉/表头）统一叫「就业相关」。
+                              // （6~13 在「更多▾」下拉里；11/13 配色**反向**：越短越好）
+                              // ⚠️ 键号与计算器 GrowthSupported / 各 switch 一一对应，加键必须同步改（清单见交接文档 §0.2 B）
         private bool _moreSortOpen; // 更多排序下拉展开状态
+        /// <summary>通勤时间「开始/停止」上次点的是哪个（-1 没点过 / 0 开始 / 1 停止）——只用来高亮（用户 2026-09-27）。</summary>
+        private int _commuteBtn = -1;
+
+        /// <summary>
+        /// 键 12「就业相关」的子口径（用户 2026-09-28）：false = 本地就业率（%），true = 区域工人数（人）。
+        /// **显示口径开关**，与「最长10%/增速」一样**不落盘**，读档由 Awake 复位成 false。
+        /// </summary>
+        private bool _employWorkers;
+        /// <summary>
+        /// 「最长10%」口径开关（用户 2026-09-27）：开着时，**平均通勤时间**这一列的数值与排名改用
+        /// 「每区划样本里最大的 10%」的平均（`GetCommuteTopTime`），聚合/组合按趟数加权同样跟着切。
+        /// ⚠️ 只是**显示口径**：不写进设置、不落盘，周库入库永远记均值（显示设置不许改历史数据）。
+        /// 高亮 = **当前是否开启**（与「开始/停止」那种"上次点过"不同，这个是开关）。
+        /// </summary>
+        private bool _commuteTopMode;
+        /// <summary>「让所有公园和广场全天开放」的执行结果（显示在设置面板里，用户 2026-09-27）。</summary>
+        private string _parkOpenMsg;
+        /// <summary>「自定义投资额跟随 RealTime 日历」切换后的结果提示（绿色一行，同 _parkOpenMsg）。</summary>
+        private string _investScaleMsg;
         private float _moreBtnX, _moreBtnY; // 「更多 ▾」按钮位置（供最后绘制下拉用）
+        private Vector2 _moreScroll; // 「更多 ▾」下拉的滚动位置（限高 5 行，超出滚动）
+        private bool _moreDrag;      // 是否正在拖「更多 ▾」右侧那个滑块
+        /// <summary>「增速」开关（「自定义」右边的按钮）。开启后，**能算增速**的排序键一律改用
+        /// 「增速%」参与排序、热力配色与数值显示；算不了增速的键（建筑价值增量 / 自定义政府投资额）保持原样。
+        /// 与 _viewMode / _sortKey 一样**只在本次会话内有效**，不写进设置（避免下次开局莫名其妙还是增速视图）。
+        /// 口径见 DistrictFinanceCalculator.GetGrowth。</summary>
+        private bool _growthMode;
         private bool _helpVis; // 操作说明面板可见
         private Vector2 _helpPos = new Vector2(-1f, 100f);
         private bool _helpDragging;
@@ -183,8 +270,15 @@ namespace DistrictFinanceManager
         private bool _settingsOpen;
         private Vector2 _setPos = new Vector2(-1f, 140f);
         private bool _setDragging;
-        private const float SET_W = 460f;
-        private const float SET_H = 132f;
+        /// <summary>
+        /// **构建标记**：每次重新部署 DLL 时手动改一次，显示在设置面板最下面。
+        /// 用途（2026-09-27 血的教训）：改了 DLL 但玩家没重启游戏时，面板/日志看起来"功能没生效"，
+        /// 有了这一行就能一眼确认"游戏里跑的到底是哪一版"，不用再靠日志反推。
+        /// </summary>
+        private const string BUILD_TAG = "2026-09-29 23:50 修换锚+去重写";
+
+        private const float SET_W = 640f;   // 2026-09-27 用户要求：设置面板调宽、调高、字加大
+        private const float SET_H = 700f;   // 用户 2026-09-28：+「跟随 RealTime 日历」+「只统计白天数据」说明 + 缓存/状态行
         private Vector2 _helpScroll;
         private readonly Dictionary<ushort, bool> _ex = new Dictionary<ushort, bool>();
         private int _addLevel = DistLevel.REGION;
@@ -207,6 +301,19 @@ namespace DistrictFinanceManager
         {
             _hub = GetComponent<DistrictFinanceHub>();
             LoadKey();
+            // 构建标记：面板上不再常显（用户 2026-09-28 要求删掉那一行），改为**每次进图写一行日志** ——
+            // 核对「游戏里跑的到底是哪一版」时去 output_log.txt 搜 [DFM] 构建 即可（排查手段不丢）。
+            Debug.Log("[DFM] 构建：" + BUILD_TAG);
+            // 「显示口径」类开关**一律默认关闭**（用户 2026-09-27：「还是默认关闭」）：
+            //   · 「最长10%」→ 每次开新图/读档都从**平均值**口径开始；
+            //   · 「增速」→ 同理，读档后回到关闭（说明面板里也是这么写的）；
+            //   · 「开始/停止」按钮的**高亮复位**（没点过 → 两个都不亮，与「默认停止」一致）。
+            // 这三个都不落盘。这里**显式复位**，不依赖「面板组件每张图都重建」这个巧合 ——
+            // 哪天面板改成跨图复用（单例），这一行就是唯一能保证默认状态的地方。
+            _commuteTopMode = false;
+            _growthMode = false;
+            _commuteBtn = -1;
+            _employWorkers = false;   // 「就业相关」默认回到「本地就业率」（用户 2026-09-28 定）
             // 打开存档后是否自动显示面板（居中，见 OnGUI 里的位置初始化）。
             // 由选项「打开存档时自动显示面板」控制，默认开。快捷键（默认 F9）始终是开关。
             _vis = ModSettings.Load().ShowOnLoad;
@@ -351,31 +458,160 @@ namespace DistrictFinanceManager
             if (GUI.Button(new Rect(p.x + p.width - 50, p.y + 4, 44, 30), "✕", _btn))
                 _settingsOpen = false;
 
+            // 面板内的字体统一放大（设置面板条目少、要给足可读性，用户 2026-09-27 要求）
+            GUIStyle setBtn = new GUIStyle(_btn); setBtn.fontSize = 16;
+            GUIStyle setTxt = new GUIStyle(_fl); setTxt.fontSize = 14;
+            GUIStyle setDiag = new GUIStyle(_diag); setDiag.fontSize = 13;
+            float setBtnH = BTN_H + 8f;
+            float setTextH = TEXT_H + 6f;
+
             float y = p.y + 8;
-            GUI.Label(new Rect(p.x + PAD, y, p.width - PAD * 2 - 60, 36),
-                Loc.T("设置（拖动标题栏移动）", "Settings (drag title to move)"), _ti);
-            y += 38;
+            GUIStyle setTitle = new GUIStyle(_ti); setTitle.fontSize = 22;
+            GUI.Label(new Rect(p.x + PAD, y, p.width - PAD * 2 - 60, 40),
+                Loc.T("设置（拖动标题栏移动）", "Settings (drag title to move)"), setTitle);
+            y += 44;
 
             if (_hub == null || _hub.Settings == null) return;
             ModSettings s = _hub.Settings;
 
             // ---- 排序中是否显示直辖区划（默认否）----
             bool direct = s.IncludeDirect;
-            if (GUI.Button(new Rect(p.x + PAD, y, p.width - PAD * 2, BTN_H),
+            if (GUI.Button(new Rect(p.x + PAD, y, p.width - PAD * 2, setBtnH),
                 (direct ? "☑ " : "☐ ") + Loc.T("排序中显示直辖区划",
-                    "Show directly-administered entries in rankings"), _btn))
+                    "Show directly-administered entries in rankings"),
+                setBtn))
             {
                 s.IncludeDirect = !direct;
                 s.Save();          // 面板里的改动同样立即落盘
                 _finDistrict = 0;  // 榜单要重画
             }
-            y += BTN_H + 4;
+            y += setBtnH + 4;
 
-            GUI.Label(new Rect(p.x + PAD, y, p.width - PAD * 2, TEXT_H),
+            GUI.Label(new Rect(p.x + PAD, y, p.width - PAD * 2, setTextH),
                 Loc.T("开启后，单级排名里会额外列出上一级（直辖）区划作为参考条目，不占排名号。",
                       "When on, per-level rankings also list the parent-level entries as reference rows (not numbered)."),
-                _diag);
-            y += TEXT_H + GAP;
+                setDiag);
+            y += setTextH + GAP;
+
+            // ---- 公园/广场全天开放（**勾选框**，直接显示当前状态；用户 2026-09-27「是否开启用框表示」）----
+            // **覆盖模式**（用户 2026-09-27）：「勾选框」直接就是 RealTimeBridge 的覆盖状态，
+            // 不读、也不改 RealTime 的任何配置 —— 勾上 = 挂 Harmony 前缀盖住它的公园维护判定。
+            bool rtOn = RealTimeBridge.Active;
+            string parkTitle = Loc.T("公园和广场全天运营", "Keep all parks & plazas open 24h");
+            string parkLabel = (rtOn ? "☑ " : "☐ ") + parkTitle
+                + Loc.T("（覆盖模式，不改 RealTime 设置）", " (override; RealTime settings untouched)");
+            if (GUI.Button(new Rect(p.x + PAD, y, p.width - PAD * 2, setBtnH), parkLabel, setBtn))
+            {
+                string detail;
+                bool ok = RealTimeBridge.SetOverride(!rtOn, out detail);
+                if (ok) { s.ParkAlwaysOpen = !rtOn; s.Save(); }   // 保存勾选状态（默认不勾选）
+                _parkOpenMsg = (ok ? Loc.T("成功：", "OK: ") : Loc.T("未改动：", "Not changed: ")) + detail;
+            }
+            y += setBtnH + 4;
+
+            // 说明**手动分段**（用户 2026-09-27：「注意分段」）：一行一个意思，别写成一大段。
+            // 段落靠 \n 分隔；**同时开 wordWrap 并用 CalcHeight 量实际高度** —— 中文一行能放多少字取决于
+            // 字体（本模组装了中文字体替换），写死 setTextH × N 的话长句会横着溢出面板、或者被下一块盖住
+            // （说明面板当初就是这么踩的坑，见 DrawHelpPanel 的注释）。
+            GUIStyle setNote = new GUIStyle(setDiag); setNote.wordWrap = true;
+            float noteW = p.width - PAD * 2;
+            string parkNote = Loc.T("若使用 RealTime，公园与广场会在夜间关闭，其吸引力与地价随之下降。\n"
+                      + "地价是 GDP、地均 GDP、人均可支配收入等多项统计的重要输入之一，统计结果因此产生波动。\n"
+                      + "建议勾选本项：本模组只会在内存里盖住公园与广场的运营时间判定，不会修改 RealTime 的任何设置；取消勾选即完全恢复。\n"
+                      + "若不勾选（默认）：装了 RealTime 时只统计白天数据，夜晚暂停写入周库、跳过夜晚，白天照常按游戏周连续记录。\n"
+                      + "未安装 RealTime 时本项无效果。",
+                      "With RealTime installed, parks and plazas close at night; their attractiveness and land value drop.\n"
+                      + "Land value is one of the important inputs to GDP, GDP per m2, disposable income and other stats, so the figures fluctuate.\n"
+                      + "It is recommended to check this box: this mod only overrides the operating-hours check for parks and plazas in memory and never changes RealTime's settings; unchecking restores everything.\n"
+                      + "If left unchecked (the default) while RealTime is installed, only daytime data is counted: writing to the weekly DB pauses at night and the night weeks are skipped, while daytime keeps being recorded week by week.\n"
+                      + "No effect when RealTime is not installed.");
+            float parkNoteH = setNote.CalcHeight(new GUIContent(parkNote), noteW);
+            GUI.Label(new Rect(p.x + PAD, y, noteW, parkNoteH), parkNote, setNote);
+            y += parkNoteH + 2;
+            if (!string.IsNullOrEmpty(_parkOpenMsg))
+            {
+                // 结果提示同样按面板宽度折行（用户 2026-09-28：「设置的文字按面板宽度分行」）——
+                // 之前是固定两行的矩形，长句（比如失败原因里带着方法名）会横着溢出面板
+                GUIStyle res = new GUIStyle(setTxt); res.wordWrap = true;
+                res.normal.textColor = new Color(0.65f, 1f, 0.65f);
+                float msgH = res.CalcHeight(new GUIContent(_parkOpenMsg), noteW);
+                GUI.Label(new Rect(p.x + PAD, y, noteW, msgH), _parkOpenMsg, res);
+                y += msgH + GAP;
+            }
+
+            // ---- 当前状态行（活数据，不是说明文字）：让玩家一眼看出「现在到底写不写周库」 ----
+            {
+                string st;
+                Color stc;
+                if (_hub == null) { st = ""; stc = Color.gray; }
+                else if (!RealTimeBridge.Installed)
+                { st = Loc.T("当前：未检测到 RealTime → 全天都写入周库。", "Now: no RealTime detected - the weekly DB records the whole day."); stc = new Color(0.65f, 0.8f, 1f); }
+                else if (_hub.NightSkipActive)
+                {
+                    st = GameWeek.IsNight
+                        ? Loc.T("当前：RealTime 在场、未开覆盖，夜里 → 周库暂停写入（本次夜晚已跳过 " + _hub.NightSkippedWeeks + " 周），白天恢复。",
+                                "Now: RealTime present, override off, night - DB writing paused (" + _hub.NightSkippedWeeks + " weeks skipped this night); resumes in daytime.")
+                        : Loc.T("当前：RealTime 在场、未开覆盖，白天 → 正常写入（只统计白天数据）。",
+                                "Now: RealTime present, override off, daytime - writing normally (daytime data only).");
+                    stc = GameWeek.IsNight ? new Color(1f, 0.8f, 0.45f) : new Color(0.65f, 1f, 0.65f);
+                }
+                else
+                { st = Loc.T("当前：公园覆盖已生效 → 全天都写入周库。", "Now: park override active - the weekly DB records the whole day."); stc = new Color(0.65f, 1f, 0.65f); }
+                if (st.Length > 0)
+                {
+                    GUIStyle stS = new GUIStyle(setTxt); stS.wordWrap = true;
+                    stS.normal.textColor = stc;
+                    float h = stS.CalcHeight(new GUIContent(st), noteW);
+                    GUI.Label(new Rect(p.x + PAD, y, noteW, h), st, stS);
+                    y += h + 2;
+                }
+            }
+            // ---- 自定义投资额是否跟随 RealTime 日历（用户 2026-09-28：「设置里加入自定义投资额是否跟随
+            //      realtime 日历，勾选后把自定义投资额记入步长改为按 realtime 日历的周」）----
+            bool cal = s.InvestFollowRealTime;
+            string calLabel = (cal ? "☑ " : "☐ ") + Loc.T("自定义投资额跟随 RealTime 日历",
+                "Custom investment follows the RealTime calendar");
+            if (GUI.Button(new Rect(p.x + PAD, y, p.width - PAD * 2, setBtnH), calLabel, setBtn))
+            {
+                s.InvestFollowRealTime = !cal;
+                s.Save();
+                if (_hub != null) _hub.ReanchorInvestments("切换设置");   // 已有分期换锚，不丢
+                _investScaleMsg = s.InvestFollowRealTime
+                    ? Loc.T("已改为按 RealTime 日历周记账（已有分期已换锚，相对位置不变）。",
+                            "Now recording by RealTime calendar weeks (existing instalments re-anchored, positions kept).")
+                    : Loc.T("已改回按原版帧周记账（已有分期已换锚，相对位置不变）。",
+                            "Back to vanilla frame-weeks (existing instalments re-anchored, positions kept).");
+            }
+            y += setBtnH + 4;
+
+            // 说明**手动分段**（同公园那段的规矩）：一行一个意思；同样 wordWrap + CalcHeight 量高
+            string calNote = Loc.T("原版「游戏周」按模拟帧数算（4096 帧 = 1 周），不受 RealTime 影响；RealTime 改写了游戏日历，游戏里看到的「一周」比它长得多。\n"
+                      + "本项决定「自定义政府投资额」的分期按哪把尺子记账：不勾 = 原版帧周（与周库同尺）；勾上 = 游戏日历上的周（周 1 期 / 月 4 期 / 季 13 期 / 年 52 期 / 5 年 260 期 / 10 年 520 期）。\n"
+                      + "切换勾选不会丢数据：已有分期会按「相对现在的位置」整体平移（3 周前录的仍是 3 周前）。未装 RealTime 时两种刻度几乎相同，勾不勾都一样。",
+                      "Vanilla \"weeks\" count simulation frames (4096 frames = 1 week) and ignore RealTime; RealTime rewrites the game calendar, so a calendar week lasts far longer.\n"
+                      + "This decides which ruler the custom-investment instalments use: off = vanilla frame-weeks (same ruler as the weekly DB); on = weeks on the in-game calendar (Week 1 / Month 4 / Quarter 13 / Year 52 / 5 years 260 / 10 years 520 instalments).\n"
+                      + "Switching never loses data: existing instalments are shifted to keep their position relative to now (one entered 3 weeks ago is still 3 weeks ago). Without RealTime the two rulers are nearly identical.");
+            float calNoteH = setNote.CalcHeight(new GUIContent(calNote), noteW);
+            GUI.Label(new Rect(p.x + PAD, y, noteW, calNoteH), calNote, setNote);
+            y += calNoteH + 2;
+            if (!string.IsNullOrEmpty(_investScaleMsg))
+            {
+                GUIStyle res2 = new GUIStyle(setTxt); res2.wordWrap = true;
+                res2.normal.textColor = new Color(0.65f, 1f, 0.65f);
+                float h2 = res2.CalcHeight(new GUIContent(_investScaleMsg), noteW);
+                GUI.Label(new Rect(p.x + PAD, y, noteW, h2), _investScaleMsg, res2);
+                y += h2 + GAP;
+            }
+
+            // 构建标记：**面板上一个字都不画**（用户 2026-09-28 截图指着它说"这一段不要"；
+            // 连"勾了显示调试信息才画"都不要 —— 用户档里 ShowDebug 就是开的）。
+            // 需要核对版本时看日志：Awake 里每次进图写一行 `[DFM] 构建：…`（见 DistrictFinancePanel.Awake）。
+            // 下面只留「缓存」状态行（文件只在游戏存档时写盘 → 有没有还没落盘的改动）。
+            string cacheTxt = (_hub != null && _hub.CacheDirty)
+                ? Loc.T("缓存：有改动未落盘（游戏存档时写入）", "Cache: changes not yet written (written when the game saves)")
+                : Loc.T("缓存：与存档一致", "Cache: in sync with the save");
+            GUI.Label(new Rect(p.x + PAD, y, p.width - PAD * 2, setTextH), cacheTxt, setDiag);
+            y += setTextH + GAP;
         }
 
         /// <summary>独立操作说明面板（可拖动、不随主面板移动/缩放）。</summary>
@@ -414,38 +650,71 @@ namespace DistrictFinanceManager
 
             string[] helpLines = Loc.IsEn
                 ? new string[] {
-                    "[Hotkey] Press F9 to toggle this panel (changeable in Options; there are also Help / Language buttons at the top of the panel).",
-                    "Drag the panel by its top-left; wheel over the top-right to zoom.",
-                    "List below for viewing/sorting - switch views: Hierarchy / Group / All districts / City / District / Town / Village / Custom.",
+                    "[Budget] For consistent statistics, the day budget and the night budget should be set to the same values. When the two differ, land value alternates between two sets of figures as day turns to night; land value is one of the important inputs to GDP, land value, disposable income and most other metrics in this mod, so the affected figures will fluctuate within a single game day. Budgets are set separately for day and night in the game's Budget panel.",
+                    "Drag the top-left to move the panel; wheel over the top-right to zoom.",
+                    "The list below is for viewing and sorting - switch views with Hierarchy / Group / All districts / City / District / Town / Village / Custom.",
                     "[Assign levels]",
-                    "First select the \"Hierarchy\" view.",
-                    "1. (Optional) Click a district in the assigned list first, then follow the steps below to attach new districts under the selected one.",
-                    "2. In \"Assign level\" choose the target level for new districts: City / District / Town / Village.",
-                    "3. Click a district in the \"Unassigned\" list to add it.",
-                    "Example: If district A is set as City level, A itself is the directly-administered area; districts B and C are attached under A. City-level ranking will include all data of A and its subordinates, while in district-level ranking, A participates separately as a directly-administered district (can be disabled in options).",
+                    "1. Switch to the Hierarchy view first.",
+                    "2. (Optional) Click a district in the assigned list first; districts added afterwards will hang under it.",
+                    "3. Under \"Assign level\" pick the target level: City / District / Town / Village.",
+                    "4. Click a district in the \"Unassigned\" list to add it.",
+                    "Example: with A set as City level, A itself is the directly-administered area and B, C hang under A. The city-level ranking covers A and everything below it; in the district-level ranking A takes part separately as directly-administered (can be turned off in Options).",
                     "[Remove hierarchy]",
-                    "Select an assigned district and click the \"Remove\" button: it will be removed from the hierarchy along with all its subordinates (the district itself stays in the game).",
+                    "Select an assigned district and click Remove: it is removed from the hierarchy together with everything below it (the district itself stays in the game).",
                     "[Groups]",
-                    "The Group view lets you group any districts and name them. A group only sums its members' own values and never affects the hierarchy; created groups auto-sort.",
-                    "[Custom government investment] The \"Custom\" view lets you enter an amount per district: click a district in the list, type a number above, pick a unit (k / m / b, default k), then Apply. The amount is NOT booked in one go - it is spread evenly over the CURRENT period as weekly instalments (Week = 1 instalment into this week; Month = 4 instalments, one per week starting this week; Quarter / Year / 5 years = 13 / 52 / 260 instalments the same way). A negative number deducts. The list ranks and colours districts by the amount credited in the last x weeks, where x is the current period (Week 1 / Month 4 / Quarter 13 / Year 52 / 5 years 260) - the same rolling-window rule as \"Building value delta\". So right after entering an amount you only see the first instalment; it grows week by week to the full amount, then falls back out of the window week by week after one period has passed. \"Clear\" removes ALL instalments of that district, including the ones still pending in future weeks. Values are saved per save file and reuse the Building value delta colour tiers. It is also selectable from \"More\" in other views (flat lists use the own value; hierarchy / groups / per-level rankings use the aggregate).",
-                    "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data. Showing 0 right after loading a save or enabling the mod is normal."
+                    "The Group view lets you group any districts and name them; a group only sums its members' own values and never affects the hierarchy. Groups sort themselves automatically.",
+                    "[Custom government investment]",
+                    "1. Switch to the Custom view and click a district in the list.",
+                    "2. Type an amount above, pick a unit (k / m / b, default k) and click Apply; a negative amount deducts.",
+                    "3. The money is not credited at once: it is spread over the current period as weekly instalments starting this week (Week 1 / Month 4 / Quarter 13 / Year 52 / 5 years 260 / 10 years 520).",
+                    "4. The list ranks and colours by the part credited in the latest period, so a fresh entry shows only its first instalment, grows to the full amount week by week, then falls off again after one period.",
+                    "5. Clear removes all instalments, including ones still pending in future weeks. Saved per save file.",
+                    "6. Recording ruler: by default the vanilla game week (4096 simulation frames = 1 week, unaffected by RealTime). With \"Custom investment follows the RealTime calendar\" checked in Settings, instalments are recorded by weeks on the in-game calendar (the number of instalments does not change: Week 1 / Month 4 / Quarter 13 / Year 52 / 5 years 260 / 10 years 520). Switching the checkbox shifts existing instalments so they keep their position relative to now - nothing is lost.",
+                    "[Saving] This mod's data (weekly DB, investment instalments, hierarchy, groups, commute samples, tombstones) is kept in memory as a cache and is written to files only when the game saves (under %LOCALAPPDATA%\\Colossal Order\\Cities_Skylines\\Addons\\Mods\\DistrictFinanceManager\\saves). So if you reload a save without saving first, everything produced since that save is discarded and the files stay as they were at that save. The Settings panel shows whether the cache still matches the save.",
+                    "[Growth]",
+                    "The button right of Custom is a toggle. When on, every sort key that has a growth rate (GDP / Pop / GDP per capita / Land value / GDP per m2 / Pop density / Area / Built-up area / Disposable per capita) switches to growth % for sorting, colours and display.",
+                    "Growth = (current value - value N weeks ago) / value N weeks ago x 100%, N being the current period in weeks; 0 when there is less than one period of history. The legend tiers are annual and rescaled to the current period by compounding. Building value delta and Custom gov. investment are increments themselves and have no growth. The switch is not saved.",
+                    "Note: in a small district (few residents or samples) growth can swing wildly from a single data point - treat it as indicative only.",
+                    "[More] The dropdown extends to the bottom of the panel - scroll with the wheel or the slider on the right. Clicking an item only changes the sort key and keeps the list open.",
+                    "[Commute] All three are counted by residence: avg commute = average straight-line home-to-work distance; local employment = share whose workplace is in the same district; avg commute time = door-to-door duration (waiting and transfers included). For an aggregate or a group, working in ANY member district counts as local. Distance and time are shorter-is-better (reversed colours, ascending order; 0 = no data, shown in white at the bottom). Avg commute time only counts after you press Start under that sort key (only trips heading to a workplace are counted); a district shows once it has enough samples (about a quarter of its employed residents), otherwise a white 0. Stop discards not-yet-finished trips but keeps the samples collected; pressing Start again just continues. It follows travelling citizens frame by frame and costs noticeable CPU, so press Stop when you do not need it.",
+                    "[Employment] This key has two readings, and two buttons appear under it when it is the active sort key. Local employment = share of the district's employed residents whose workplace is also in that district (%). District workers = the worker count shown on the vanilla district panel (the sum of the alive counts of the commercial / industrial / office / player-industry areas; public-service employees are not included), read straight from the game data with no scanning. The worker count is a sum, so the list, the groups and the filtered view also show a share; and only the worker count supports Growth (local employment is a ratio, so it has none). The sub-mode always starts on Local employment after loading a save and is not written to the settings.",
+                    "[Share] Sum-type metrics (GDP / Pop / Area / Building value delta / Built-up area / Custom investment / District workers) show a share; without a filter the denominator is the whole city, with a filter it becomes the aggregate of the filtered district (its own value plus everything under it).",
+                    "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data; avg commute time needs Start to be pressed and enough samples for the district before it shows (it costs noticeable CPU - press Stop when unused). Showing 0 right after loading a save or enabling the mod is normal.",
+                    "[Settings - Parks and daytime-only data] If you use RealTime it assigns operating hours to parks and plazas, so they close at night, their attractiveness and land value drop, and GDP / land value / disposable income here fluctuate within a day. Two ways to deal with it, and the Settings panel offers the first one: check \"Keep all parks & plazas open 24h\" and the mod overrides that operating-hours check in memory only (RealTime's own settings are never changed; unchecking restores everything). If you leave it unchecked (the default) while RealTime is installed, the mod instead counts daytime data only: writing to the weekly DB pauses at night and the night weeks are skipped, while daytime keeps being recorded week by week. Without RealTime neither has any effect.",
                 }
                 : new string[] {
-                    "【快捷键】按 F9 开关本面板（快捷键可在「选项」里修改；面板顶部也有「说明 / 语言」按钮）。",
+                    "【预算设置】为保证统计口径一致，建议将白天预算与夜间预算设置为相同数值。两者不一致时，地价会随昼夜交替在两套数值之间变动；地价是本模组 GDP、地价、人均可支配收入等多项指标的重要输入之一，相关统计结果将在同一游戏日内出现波动。预算可在游戏内的「预算」面板中按昼夜分别设置。",
+                    "【快捷键】按 F9 开关本面板（快捷键可在「选项」里修改；面板顶部也有「设置 / 说明 / 语言」按钮）。",
                     "左上角拖动面板；右上角滚轮缩放面板。",
-                    "下方列表用于查看与排序——用 层级/组合/所有区划/市/区县/乡镇/村社区/自定义 切换视图。",
+                    "下方列表用于查看与排序 —— 用 层级 / 组合 / 所有区划 / 市 / 区县 / 乡镇 / 村社区 / 自定义 切换视图。",
                     "【层级分配】",
-                    "请先选择「层级」视图。",
-                    "1.（可选）已加入的区划列表中点击某个区划再执行下面步骤，即可挂到当前选中区划下。",
-                    "2. 在「分配层级」处选择新加入目标级别：市 / 区县 / 乡镇 / 村社区。",
-                    "3. 在「未分配区划」点选一个区划即可加入。",
-                    "例：如a区划被定为市级，其自身定义为市直辖区域，b区c区被挂入a市，市级排名将会计入a与下辖区域的所有数据，而按照区级排名，a自身作为直辖区划会单独参与排名（直辖参与排名可在选项中关闭）。",
+                    "1. 请先切到「层级」视图。",
+                    "2.（可选）先在已分配列表里点一个区划，之后再加入的区划就会挂在它下面。",
+                    "3. 在「分配层级」处选择新加入的目标级别：市 / 区县 / 乡镇 / 村社区。",
+                    "4. 在「未分配区划」里点一个区划即可加入。",
+                    "例：a 定为市级，则 a 自身是市直辖区域，b、c 挂入 a 市；市级排名算 a 与全部下辖，而按区级排名时 a 作为直辖区划单独参与（直辖参与排名可在选项中关闭）。",
                     "【移除层级】",
-                    "选中一个已分配的区划，点「移除」按钮，会将其连同所有下辖一起从层级树中移除（区划本身仍保留在游戏中）。",
+                    "选中一个已分配的区划，点「移除」按钮：它会连同所有下辖一起从层级树中移除（区划本身仍保留在游戏中）。",
                     "【组合】",
                     "组合视图可把任意区划组合成组并命名；组合只统计各成员自身值合计，不影响层级。创建后自动排序。",
-                    "【自定义政府投资额】「自定义」视图可手动给各区划录入一笔投资额：点列表里的区划，在上方输入数字、选单位（k / m / b，默认 k）、点确定。这笔钱**不是一次性计入**，而是按**当前统计周期**均摊成若干期、从本周起每周计入一期：周期为「周」时整笔计入本周；「月」则平均分成 4 份、本周起 4 周各计一份；季 / 年 / 5年 同理（13 / 52 / 260 份）。输入负数表示冲减。列表按**最近 x 周已计入的部分**排序与配色，x = 当前周期周数（周 1 / 月 4 / 季 13 / 年 52 / 5年 260）——与「建筑价值增量」同一个滚动窗口口径。所以刚录入时只显示第一期，随后逐周涨到整笔，过了一个周期又会逐周退出统计（滚动窗口的固有行为）。「清空」会删掉该区划**全部分期**，包括记在未来周上还没计入的那些。数值按存档保存，配色复用「建筑价值增量」的分档。也可在其它视图的「更多 ▾」里选它排序（平铺列表用自身值，层级树/组合/单级排名用聚合值）。",
-                    "【统计耗时】建成区面积、建筑价值增量、人均可支配等需要遍历全城建筑的统计项，约 30 秒后才有数据；刚读取存档或刚启用模组时显示为 0 属正常。"
+                    "【自定义政府投资额】",
+                    "1. 切到「自定义」视图，点列表里的区划。",
+                    "2. 在上方输入金额、选单位（k / m / b，默认 k），点「确定」；负数表示冲减。",
+                    "3. 这笔钱不是一次性计入：按当前周期均摊，从本周起每周计入一期（周 1 期 / 月 4 期 / 季 13 期 / 年 52 期 / 5 年 260 期 / 10 年 520 期）。",
+                    "4. 列表按最近一个周期已计入的部分排序配色：刚录入只显示第一期，逐周涨到整笔，过一个周期后又逐周退出。",
+                    "5.「清空」删掉全部分期（含未来还没计入的）。按存档保存。",
+                    "6. 记账刻度：默认按原版游戏周（4096 模拟帧 = 1 周，不受 RealTime 影响）；在「设置」里勾选「自定义投资额跟随 RealTime 日历」后，改按游戏日历上的周记账（分期数量不变：周 1 期 / 月 4 期 / 季 13 期 / 年 52 期 / 5 年 260 期 / 10 年 520 期）。切换勾选会把已有分期按「相对现在的位置」整体平移，不会丢数据。",
+                    "【保存】本模组的数据（周库、投资分期、层级、组合、通勤样本、墓碑）平时只放在内存里当缓存，只有游戏存档时才写入文件（位置：%LOCALAPPDATA%\\Colossal Order\\Cities_Skylines\\Addons\\Mods\\DistrictFinanceManager\\saves）。因此不存档就回档或读旧档时，那次游戏里产生的数据一律丢弃，文件仍是上次存档时的样子。「设置」面板最下面一行会显示缓存是否与存档一致。",
+                    "【增速】",
+                    "「自定义」右边的「增速」是开关。开启后，能算增速的排序键（GDP / 人口 / 人均GDP / 地价 / 地均GDP / 人口密度 / 面积 / 建成区面积 / 人均可支配）一律改用增速%排序、配色与显示。",
+                    "增速 =（当前值 − N 周前的值）÷ N 周前的值 × 100%，N = 当前周期周数；历史不足一个周期时记 0。图例档位是年档位，按复利换算到当前周期。「建筑价值增量」「自定义政府投资额」本身是增量，没有增速。开关不保存，读档后回到关闭。",
+                    "注意：区划较小时（人口、样本少）增速容易被个别数据带得大幅波动，仅供参考。",
+                    "【更多 ▾】下拉展开到面板底部，条目超出可视范围时用右侧滑块或滚轮滚动；点条目只换排序键，不收起下拉。",
+                    "【通勤】三项都按居住地统计：平均通勤距离＝住址到工作地的平均直线距离；本地就业率＝工作地也在本区划的比例；平均通勤时间＝门到门的时长（含候车与换乘）。聚合与组合里，工作地在范围内任一个成员内即算本地就业。距离与时间越短越好（反向配色、由小到大排；0＝无数据，白色排在最后）。平均通勤时间要在该排序下点「开始」才统计（只统计终点是工作地的那一趟）；本区划攒够样本（约就业居民数的八分之一）才显示，不足时显示白色 0，并在后面注明已统计的百分比（样本数占门槛的比例，攒到 100% 就会出数值）。「停止」会丢弃还没跟踪完的行程，已攒的样本保留；再点「开始」接着攒。这一项逐帧跟踪在途市民，性能消耗较大，不用时请点「停止」。最右边那个「最长10%」是显示口径开关：开启后改用各区划样本里最大的百分之十的平均值来显示与排名（聚合、组合也按样本数加权跟着切），用来看「最堵的那批通勤」；它只改显示，不影响周库与已攒样本，关掉就回到平均值。",
+                    "【就业相关】这个键有两套口径：成为当前排序键时它下面会出现两个按钮。「本地就业率」＝本区划就业居民里、工作地也在本区划的比例（%）；「区域工人数」＝原版区划面板里那一格的工人数（商业 / 工业 / 办公 / 玩家产业四处「在岗人数」之和，不含公共服务职工），纯读原版数据、不做任何遍历。工人数是求和型，所以列表 / 组合 / 筛选后面都会写「占比」；也只有工人数能开「增速」（本地就业率是比值，没有增速）。子口径读档后一律回到「本地就业率」，不写进设置。",
+                    "【占比】求和型指标（GDP / 人口 / 面积 / 建筑价值增量 / 建成区面积 / 自定义投资额 / 区域工人数）在列表里显示「占比」；没筛选时分母是全图合计，开启筛选后换成筛选区划的聚合值（自身 + 全部下辖）。",
+                    "【统计耗时】建成区面积、建筑价值增量、人均可支配等需要遍历全城建筑的统计项，约 30 秒后才有数据；平均通勤时间需先点「开始」，并等本区划攒够样本后才显示（性能消耗较大，不用时点「停止」）。刚读取存档或刚启用模组时显示为 0 属正常。",
+                    "【设置·公园与只统计白天】装了 RealTime 时，它会给公园和广场排营业班次、夜里关门，吸引力与地价随之下降，本模组的 GDP / 地价 / 人均可支配会在一天之内波动。两种应对，设置面板里可选：勾选「公园和广场全天运营」，本模组只在内存里覆盖那条运营时间判定（不改 RealTime 的设置，取消勾选即恢复）；不勾选（默认）而装了 RealTime 时，改为只统计白天数据 —— 夜晚暂停写入周库并跳过夜晚，白天照常按游戏周连续记录。没装 RealTime 时两种都不起作用。",
                 };
 
             GUIStyle helpStyle = new GUIStyle(_fl);
@@ -757,8 +1026,18 @@ namespace DistrictFinanceManager
             y += BTN_H + GAP;
 
             // ==== 颜色图例（按排序依据切换；默认 GDP）====
+            // 「增速」优先：能算增速的键在图例里换成「以 0 为中心」的百分数档位（SortLabel 已带「增速」后缀）。
+            // ⚠️ 必须排除「自定义」视图：进这个视图**不会**自动把 _sortKey 改成 10（要手点那个排序按钮才会），
+            //    否则从别的视图带着 _sortKey=0 进来时，图例会变成 GDP 增速、而列表显示的却是投资额。
+            //    增量键 7 本来就「算不了增速」，自然落到下面的原分支。
+            if (_viewMode != VIEW_INVEST && GrowthActive(_sortKey))
+            {
+                y = DrawLegendGrowth(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · " + SortLabel(_sortKey) + "（%/" + PeriodSuffix() + "）",
+                          "Legend · " + SortLabel(_sortKey) + " (%/" + PeriodSuffix() + ")"));
+            }
             // 「自定义」视图优先判断：它固定复用「建筑价值增量」的档位，与 _sortKey 无关
-            if (_viewMode == VIEW_INVEST)
+            else if (_viewMode == VIEW_INVEST)
             {
                 y = DrawLegend(PAD, y, PW - PAD * 2,
                     Loc.T("颜色图例 · 自定义政府投资额（" + CurrencySymbol() + "/" + PeriodSuffix() + "）",
@@ -822,6 +1101,34 @@ namespace DistrictFinanceManager
                           "Legend · Custom gov. investment (" + CurrencySymbol() + "/" + PeriodSuffix() + ")"),
                     GetBuiltDeltaDisplayTiers());
             }
+            else if (_sortKey == 11)
+            {
+                // 平均通勤距离：km 档位，与货币/周期无关（居住地口径，见计算器 GetCommuteDistance）。
+                // **invert：越近越好** → 色阶与图例都反过来（短 = 紫、长 = 红），与 CommuteColor 同向。
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 平均通勤距离（km，居住地口径，越近越好）",
+                          "Legend · Avg commute (km, by residence, shorter is better)"),
+                    COMMUTE_TIERS, true);
+            }
+            else if (_sortKey == 12)
+            {
+                // 键 12 两个子口径各自的图例（用户 2026-09-28：区域工人数按人口图例的一半设档）
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · " + EmployModeName()
+                        + (_employWorkers ? "（人，原版区划面板口径）" : "（%）"),
+                        _employWorkers
+                            ? "Legend · District workers (count, as shown on the vanilla district panel)"
+                            : "Legend · Local employment (%)"),
+                    _employWorkers ? WORKERS_TIERS : LOCAL_EMP_TIERS);
+            }
+            else if (_sortKey == 13)
+            {
+                // 平均通勤时间：分钟（现实等效，换算见计算器）——**同样 invert：越短越好**
+                y = DrawLegend(PAD, y, PW - PAD * 2,
+                    Loc.T("颜色图例 · 平均通勤时间（分钟，越短越好）",
+                          "Legend · Avg commute time (min, shorter is better)"),
+                    COMMUTE_TIME_TIERS, true);
+            }
             else
             {
                 y = DrawLegend(PAD, y, PW - PAD * 2,
@@ -847,6 +1154,16 @@ namespace DistrictFinanceManager
             if (GUI.Button(new Rect(r1 + 286, y, 70, BTN_H), viewLabels[7],
                 _viewMode == VIEW_INVEST ? _bn2 : _btn))
                 _viewMode = VIEW_INVEST;
+            // 「增速」紧挨「自定义」右侧。它**不是视图**而是一个开关：不改 _viewMode，
+            // 只是让下方所有能算增速的排序键改用增速口径（见 SortValue / SortColor / SortLabel）。
+            if (GUI.Button(new Rect(r1 + 360, y, 70, BTN_H),
+                Loc.T("增速", "Growth"), _growthMode ? _bn2 : _btn))
+            {
+                _growthMode = !_growthMode;
+                // 排查用：日志里能证明「这个按钮确实被点了」（与「更多 ▾」同款开关，由「显示调试信息」控制）
+                if (_hub != null && _hub.Settings != null && _hub.Settings.ShowDebug)
+                    Debug.Log("[DFM] growth toggle = " + _growthMode + " key=" + _sortKey);
+            }
             y += BTN_H + GAP;
 
             // 第 2 排：所有区划 / 市 / 区县 / 乡镇 / 村社区
@@ -893,17 +1210,86 @@ namespace DistrictFinanceManager
                     Loc.T("更多 ▾", "More ▾"), _sortKey >= 6 ? _bn2 : _btn))
                 {
                     _moreSortOpen = !_moreSortOpen;
+                    _moreScroll = Vector2.zero; // 每次展开都从顶部开始，不沿用上次滚到的位置
                     if (_hub != null && _hub.Settings != null && _hub.Settings.ShowDebug)
                         Debug.Log("[DFM] moreSort toggle open=" + _moreSortOpen + " key=" + _sortKey);
                 }
             }
             y += BTN_H + GAP;
 
+            // ==== 「就业相关」的两个子口径按钮（用户 2026-09-28：「把本地就业率名字改为就业相关，
+            //      点击后放两个按钮：一个还是本地就业率，第二个为区域工人数」）====
+            // 与「最长10%」同一个性质：**显示口径开关**，只换这一列取值/配色/图例/占比，不动周库与设置。
+            // 高亮 = 当前生效的那个；默认「本地就业率」（不落盘，读档复位，见 Awake）。
+            if (_sortKey == 12 && _viewMode != VIEW_INVEST)
+            {
+                if (GUI.Button(new Rect(PAD, y, 110, BTN_H), Loc.T("本地就业率", "Local employment"),
+                        _employWorkers ? _btn : _bn2))
+                    _employWorkers = false;
+                if (GUI.Button(new Rect(PAD + 116, y, 110, BTN_H), Loc.T("区域工人数", "District workers"),
+                        _employWorkers ? _bn2 : _btn))
+                    _employWorkers = true;
+                y += BTN_H + 2f;
+            }
+
+            // ==== 平均通勤时间：开始 / 停止 ====（用户 2026-09-27）
+            // 这一项是**逐帧跟踪在途市民**攒出来的，比较吃性能 —— 所以做成**手动开关**：
+            //   只有点了「开始」才统计；「停止」会把**还没跟踪完**的在途行程丢掉（不完整的记录不进统计），
+            //   **已留存的样本一律保留**（点「开始」也不清空，接着攒 —— 用户 2026-09-27 定）。
+            // 两个按钮**不高亮**（用户要求）：它就是两个动作，不表示"当前项"。
+            // 状态文字只写在按钮下面那一行（表头那几处提示已按用户要求删除）。
+            if (_sortKey == 13 && _viewMode != VIEW_INVEST)
+            {
+                DistrictFinanceCalculator calc = _hub.Calculator;
+                bool running = calc.CommuteTracking;
+                // 高亮 = **上次点的那个按钮**（用户 2026-09-27：点「开始」就「开始」亮，点「停止」就「停止」亮；
+                // 没点过之前两个都不亮）。
+                if (GUI.Button(new Rect(PAD, y, 66, BTN_H), Loc.T("开始", "Start"),
+                        _commuteBtn == 0 ? _bn2 : _btn))
+                {
+                    calc.StartCommuteTracking();
+                    _commuteBtn = 0;
+                }
+                if (GUI.Button(new Rect(PAD + 70, y, 66, BTN_H), Loc.T("停止", "Stop"),
+                        _commuteBtn == 1 ? _bn2 : _btn))
+                {
+                    calc.StopCommuteTracking();   // 无条件调用：停下所有在途跟踪并丢弃它们
+                    _commuteBtn = 1;
+                }
+                // 「最长10%」：**显示口径开关**（跟统计开关无关，停止后照样能切）——
+                // 开着时本列数值/排名改用「每区划样本里最大的 10%」的平均，聚合与组合按趟数加权一起跟着切。
+                // 高亮 = **当前开启**（用户 2026-09-27：在「停止」右边再加一个）。
+                if (GUI.Button(new Rect(PAD + 140, y, 88, BTN_H), Loc.T("最长10%", "Longest 10%"),
+                        _commuteTopMode ? _bn2 : _btn))
+                    _commuteTopMode = !_commuteTopMode;
+                // 状态词**只有两个词**（用户 2026-09-27 定稿），跟按钮同一行、放在右边
+                GUI.Label(new Rect(PAD + 232, y, 90, BTN_H),
+                    running ? Loc.T("统计中", "Counting") : Loc.T("已停止", "Stopped"), _fl);
+                y += BTN_H + 2f;
+
+                // 提示**单独占一行并自动折行**（整段绘制 + 实测高度，绝不会被裁 / 压到列表）
+                string hint = CommuteHint();
+                if (hint.Length > 0)
+                {
+                    GUIStyle hintStyle = new GUIStyle(_fl);
+                    hintStyle.wordWrap = true;
+                    float hw = PW - PAD * 2;
+                    float hh = hintStyle.CalcHeight(new GUIContent(hint), hw);
+                    GUI.Label(new Rect(PAD, y, hw, hh), hint, hintStyle);
+                    y += hh + GAP;
+                }
+                else
+                {
+                    y += GAP;
+                }
+            }
+
             // ==== 列表 ==== （右侧留出约 56px 给「更多 ▾」下拉那一列，避免下拉压到列表按钮而抢不到点击）
             const float SORT_DROP_COL = 56f;
             Rect list = new Rect(PAD, y, PW - PAD * 2 - SORT_DROP_COL, PH - PAD - y);
-            if (_viewMode == 0)
-                y = DrawCityTotals(y, PW - PAD * 2); // 层级模式：树上方显示全区合计
+            // 层级 / 所有区划：列表上方显示全区合计（含 GDP 增速）
+            if (_viewMode == 0 || _viewMode == 2)
+                y = DrawCityTotals(y, PW - PAD * 2);
             list = new Rect(PAD, y, PW - PAD * 2 - SORT_DROP_COL, PH - PAD - y);
             switch (_viewMode)
             {
@@ -922,32 +1308,123 @@ namespace DistrictFinanceManager
             DrawMoreSortDropdown();
         }
 
+        /// <summary>「更多 ▾」下拉的宽度（与「更多 ▾」按钮同宽）。高度不限项数、直接拉到面板底部，见 DrawMoreSortDropdown。</summary>
+        private const float MORE_DROP_W = 54f;
+        private const float MORE_DROP_SLIDER = 10f;   // 右侧滑块宽度
+        private const float MORE_DROP_SLIDER_GAP = 2f;
+
         /// <summary>
         /// 「更多 ▾」排序下拉：最后绘制、向下展开。列表已在其右侧留出空列（见 DrawPanel 的 SORT_DROP_COL），
         /// 故下拉不再压到列表按钮，点击不会被列表抢走。
+        /// 展开/收起只由「更多 ▾」按钮切换；**点条目只换排序键、不收起**（用户 2026-09-27 定）。
+        /// 2026-09-27：高度**一直拉到面板底部** + 右侧滑块 + 滚轮（条目越加越多，直接向下铺开会溢出面板底部）。
+        /// 滑块是**自绘**的：`GUI.BeginScrollView` 自带的滚动条在这套皮肤下看不见，而用户要的是"右边有滑块"。
+        /// 滑块拖动与滚轮都只改 `_moreScroll.y`；条目用 BeginGroup 裁掉框外部分，整体按 −_moreScroll.y 上移。
         /// </summary>
         private void DrawMoreSortDropdown()
         {
             if (!_moreSortOpen) return;
-            string[] more = Loc.IsEn ? new string[] { "Area", "Building value Δ", "Built-up area", "Disposable/cap", "Gov. investment" } : new string[] { "面积", "建筑价值增量", "建成区面积", "人均可支配", "自定义政府投资额" };
-            int[] moreKeys = new int[] { 6, 7, 8, 9, 10 }; // 追加更多排序项在此（两个数组必须等长同序）
-            Color oldBg = GUI.backgroundColor;
-            GUI.backgroundColor = Color.black; // 展开的下拉窗口背景纯黑
+            string[] more = Loc.IsEn ? new string[] { "Area", "Building value Δ", "Built-up area", "Disposable/cap", "Gov. investment", "Avg commute", "Employment", "Avg commute time" } : new string[] { "面积", "建筑价值增量", "建成区面积", "人均可支配", "自定义政府投资额", "平均通勤距离", "就业相关", "平均通勤时间" };
+            int[] moreKeys = new int[] { 6, 7, 8, 9, 10, 11, 12, 13 }; // 追加更多排序项在此（两个数组必须等长同序）
+
+            // 先量出内容总高（长条目换行占两行），再决定框高。
+            // 高度上限 = **一直拉到面板底部**（内容区下沿 PH - PAD，与列表下边缘对齐）；
+            // 条目再多就在框内用右侧滑块 / 滚轮滚（用户 2026-09-27 定：不限项数，直接顶到底）。
+            float totalH = 0f;
+            for (int i = 0; i < more.Length; i++)
+                totalH += (_btn.CalcSize(new GUIContent(more[i])).x > 50f) ? BTN_H * 2f : BTN_H;
+            float avail = PH - PAD - (_moreBtnY + BTN_H + GAP);
+            if (avail < BTN_H) avail = BTN_H;   // 面板被缩得极矮时至少留一行，别算出负高度
+            float boxH = totalH < avail ? totalH : avail;
+            float maxScroll = totalH - boxH;
+            bool needSlider = maxScroll > 0.5f;
+
             float dy = _moreBtnY + BTN_H + GAP;
+            Rect box = new Rect(_moreBtnX, dy, MORE_DROP_W, boxH);              // 条目区（右缘与「更多 ▾」按钮对齐）
+            Rect track = new Rect(box.xMax + MORE_DROP_SLIDER_GAP, dy, MORE_DROP_SLIDER, boxH);
+
+            // 夹住滚动量：条目变少 / 换了排序键后 _moreScroll 可能停在越界位置
+            if (needSlider) _moreScroll.y = Mathf.Clamp(_moreScroll.y, 0f, maxScroll);
+            else { _moreScroll.y = 0f; _moreDrag = false; }
+
+            float thumbH = needSlider ? Mathf.Max(24f, boxH * boxH / totalH) : boxH;
+            float thumbT = needSlider ? (boxH - thumbH) * (_moreScroll.y / maxScroll) : 0f;
+            Rect thumb = new Rect(track.x, track.y + thumbT, track.width, thumbH);
+
+            // ---- 交互：滚轮 + 拖滑块 ----
+            // 鼠标位置必须换算成**面板本地坐标**：Event.mousePosition 是屏幕坐标（面板还带 GUI.matrix 缩放），
+            // 而 box/track 都是本地坐标，直接比会错位。
+            Event e = Event.current;
+            Vector2 mp = LocalMouse();
+            if (needSlider && e.type == EventType.ScrollWheel && (box.Contains(mp) || track.Contains(mp)))
+            {
+                _moreScroll.y = Mathf.Clamp(_moreScroll.y + e.delta.y * (BTN_H * 1.5f), 0f, maxScroll);
+                e.Use();
+            }
+            if (needSlider)
+            {
+                if (e.type == EventType.MouseDown && e.button == 0 && thumb.Contains(mp))
+                {
+                    _moreDrag = true;
+                    e.Use();   // 吞掉这次按下，别让它顺带点到条目
+                }
+                else if (e.type == EventType.MouseUp && e.button == 0) _moreDrag = false;
+                if (_moreDrag && e.type == EventType.MouseDrag && (boxH - thumbH) > 0.5f)
+                {
+                    _moreScroll.y = Mathf.Clamp(
+                        _moreScroll.y + e.delta.y * (maxScroll / (boxH - thumbH)), 0f, maxScroll);
+                    e.Use();
+                }
+            }
+
+            // ---- 绘制 ----
+            Color oldBg = GUI.backgroundColor;
+            Color oldColor = GUI.color;
+            GUI.backgroundColor = Color.black; // 下拉里的按钮底色保持纯黑（与之前一致）
+            GUI.color = Color.black;
+            GUI.DrawTexture(box, Texture2D.whiteTexture); // 下拉底
+            GUI.color = oldColor;
+
+            GUI.BeginGroup(box);   // BeginGroup 负责裁剪：条目超出框的部分不画
+            float iy = -_moreScroll.y;
             for (int i = 0; i < more.Length; i++)
             {
                 string lbl = more[i] + (moreKeys[i] == _sortKey ? " ✓" : "");
                 bool twoLine = _btn.CalcSize(new GUIContent(more[i])).x > 50f;
                 float ih = twoLine ? BTN_H * 2f : BTN_H;
-                Rect item = new Rect(_moreBtnX, dy, 54, ih);
-                if (GUI.Button(item, lbl, twoLine ? _btnWrap : _btn))
+                if (GUI.Button(new Rect(0, iy, MORE_DROP_W, ih), lbl, twoLine ? _btnWrap : _btn))
                 {
-                    _moreSortOpen = false;
+                    // 点条目**只换排序键，不收起下拉**（用户 2026-09-27 定）：要连着试几个键时
+                    // 不用每次重新展开；收起只由「更多 ▾」按钮自己切换。
                     _sortKey = moreKeys[i];
+                    _moreScroll = Vector2.zero;   // 重画每行 ✓ 标记时从顶部开始，避免玩家看不到刚选的项
                 }
-                dy += ih;
+                iy += ih;
+            }
+            GUI.EndGroup();
+
+            if (needSlider)
+            {
+                GUI.color = new Color(0.22f, 0.22f, 0.28f, 1f);                 // 轨道
+                GUI.DrawTexture(track, Texture2D.whiteTexture);
+                GUI.color = _moreDrag ? new Color(1f, 0.85f, 0.3f, 1f)          // 滑块（拖动中变黄）
+                                      : new Color(0.62f, 0.62f, 0.70f, 1f);
+                GUI.DrawTexture(thumb, Texture2D.whiteTexture);
+                GUI.color = oldColor;
             }
             GUI.backgroundColor = oldBg;
+        }
+
+        /// <summary>
+        /// 鼠标在**面板本地 GUI 坐标**里的位置（面板左上为原点、未乘缩放）。
+        /// 面板别处用的是 `Input.mousePosition`（屏幕坐标，见 PanelInputRect / HandlePanelInput），
+        /// 两者不能混用 —— 这里统一转成本地坐标给下拉的命中判定用。
+        /// </summary>
+        private Vector2 LocalMouse()
+        {
+            Vector3 m = Input.mousePosition;
+            return new Vector2((m.x - _panelPos.x) / _scale,
+                               (Screen.height - m.y - _panelPos.y) / _scale);
         }
 
         /// <summary>
@@ -996,7 +1473,7 @@ namespace DistrictFinanceManager
             else if (_modeDropWhich == 2)
             {
                 float x = pBtn.xMax - IW;
-                for (int i = 0; i < 5; i++)
+                for (int i = 0; i < 6; i++)   // 0周 1月 2季 3年 4=5年 5=10年（2026-09-28 加 10 年）
                 {
                     Rect item = new Rect(x, pBtn.y + BTN_H * (i + 1) + 2, IW, BTN_H);
                     if (GUI.Button(item, ModSettings.PeriodName(i) + (i == per ? " ✓" : ""), _btn))
@@ -1042,11 +1519,40 @@ namespace DistrictFinanceManager
                 totalPop += popArr[did];
             }
             double avg = totalPop > 0 ? totalGdp / totalPop : 0;
+            // 全图 GDP 增速（近 x 周，x = 当前周期周数）—— 数据不足时不显示
+            string growthTxt = "";
+            double gp;
+            if (CityGdpGrowth(out gp))
+                growthTxt = Loc.T("  GDP增速 ", "  GDP growth ") + Pct(gp) + "/" + PeriodSuffix();
             GUI.Label(new Rect(PAD, y, w, VALUE_H),
                 Loc.T("全区 GDP " + CurrencySymbol(), "City GDP " + CurrencySymbol()) + F(totalGdp) +
                 Loc.T("  人均 " + CurrencySymbol(), "  /cap " + CurrencySymbol()) + F(avg) +
-                Loc.T("  人口 ", "  pop ") + totalPop.ToString("N0"), _fv);
+                Loc.T("  人口 ", "  pop ") + totalPop.ToString("N0") + growthTxt, _fv);
             return y + VALUE_H + GAP;
+        }
+
+        /// <summary>
+        /// 全图 GDP（**自身值合计**，与上面那行同一个口径）的增速%：Σ实时 ÷ Σ基准 − 1。
+        /// 两端都是**原始值**（GDP 是唯一带显示系数的量，见 Calculator.GrowthRaw），所以与货币/周期无关。
+        /// 基准合计为 0（没有历史）→ 返回 false，调用方不显示这一段。
+        /// </summary>
+        private bool CityGdpGrowth(out double pct)
+        {
+            pct = 0.0;
+            double[] live, basev;
+            if (!_hub.Calculator.GrowthRaw(0, false, out live, out basev)) return false;
+            double l = 0, b = 0;
+            ushort[] all = _hub.GetVanillaDistricts();
+            for (int i = 0; i < all.Length; i++)
+            {
+                ushort did = all[i];
+                if (did >= live.Length || did >= basev.Length) continue;
+                l += live[did];
+                b += basev[did];
+            }
+            if (b <= 0.0) return false;
+            pct = (l - b) / b * 100.0;
+            return true;
         }
 
         /// <summary>递归收集展开状态下可见的节点（防循环）。</summary>
@@ -1166,8 +1672,14 @@ namespace DistrictFinanceManager
             // 层级树是层级型视图 → 自定义投资额用**聚合**值（自身 + 全部下辖）
             double[] invest = InvestToDisplay(GetAggregateInvest());
             double[] v = new double[256];
+            // 层级树是层级型视图 → 增速用**聚合**口径（不支持的键返回 null，SortValue 自动落回原口径）
+            double[] growth = _growthMode ? GrowthForCurrentKey(true) : null;
+            // 通勤距离 / 本地就业率（居住地口径）：层级树同样是**聚合**口径
+            double[] commute = _hub.Calculator.GetAggregateCommuteDistance();
+            double[] localEmp = AggEmployValues();   // 键 12 子口径：本地就业率 / 区域工人数
+            double[] commuteTime = AggCommuteTimes();
             for (int i = 1; i < 256; i++)
-                v[i] = SortValue(_sortKey, (ushort)i, gdp, pop, land, m2, delta, built, income, invest);
+                v[i] = SortValue(_sortKey, (ushort)i, gdp, pop, land, m2, delta, built, income, invest, growth, commute, localEmp, commuteTime);
             return v;
         }
 
@@ -1187,6 +1699,64 @@ namespace DistrictFinanceManager
             return _hub.Hierarchy.IsDescendantOf(did, _hub.SelectedID);
         }
 
+        /// <summary>
+        /// 「筛选:选中下辖」正在按**区划**筛选时，被筛选的那个区划 ID（0 = 没在按区划筛选：既可能是没开筛选，
+        /// 也可能是筛选的是「组合成员」）。占比的分母要换成它的**聚合**值（自身 + 全部下辖），见 FilterAggValue。
+        /// </summary>
+        private ushort FilterDistrictId()
+        {
+            if (!_filterSubtree) return 0;
+            if (_detailGroup >= 0 && _detailGroup < Groups.Count) return 0; // 按组合成员筛选，与某个区划的聚合值无关
+            return _hub != null ? _hub.SelectedID : (ushort)0;
+        }
+
+        /// <summary>
+        /// 该排序键能不能算「占比」——**只有求和型的键可以**：GDP / 人口 / 面积 / 建筑价值增量 /
+        /// 建成区面积 / 自定义投资额。人均、地价、地均GDP、人口密度、人均可支配都是**比值型**
+        /// （聚合后仍是平均值），「占多少比例」没有意义，故一律不显示。
+        /// 排名视图与「所有区划」视图共用这一条判据。
+        /// </summary>
+        private bool ShareKey(int key)
+        {
+            // ⚠️ 键 12 只在「区域工人数」子模式下是求和型（能算占比）；「本地就业率」是比值，不能给占比。
+            if (key == 12) return _employWorkers;
+            return key == 0 || key == 1 || key == 6 || key == 7 || key == 8 || key == 10;
+        }
+
+        /// <summary>筛选区划在当前排序键下的**聚合**值（占比分母；比值型键 / 无筛选返回 0 → 不显示比例）。</summary>
+        private double FilterAggDenom(ushort fid)
+        {
+            if (fid == 0 || !ShareKey(_sortKey)) return 0.0;
+            switch (_sortKey)
+            {
+                case 0: return _hub.Calculator.GetAggregateGDP()[fid];
+                case 1: return _hub.Calculator.GetAggregatePopulation()[fid];
+                case 6: return AreaToM2(_hub.Calculator.GetAggregateArea())[fid];
+                case 7: return _hub.Calculator.GetAggregateBuiltValueDelta()[fid];
+                case 8: return _hub.Calculator.GetAggregateBuiltArea()[fid];
+                case 10: return InvestToDisplay(GetAggregateInvest())[fid];
+                case 12: return _hub.Calculator.GetAggregatePanelWorkers()[fid];   // 区域工人数
+                default: return 0.0;
+            }
+        }
+
+        /// <summary>
+        /// 全图各原版区划「自身值」合计（当前排序键口径）——**没筛选**时的占比分母。
+        /// 列表列的就是全部区划，于是各行占比之和 = 100%（用同一套 self 数组口径，不会与行值对不上）。
+        /// </summary>
+        private double TotalSelfValue(double[] gdp, long[] pop, double[] landD, double[] m2, double[] delta, double[] builtS, double[] incomeD, double[] investD,
+            double[] employD = null)
+        {
+            double t = 0;
+            ushort[] all = _hub.GetVanillaDistricts();
+            for (int i = 0; i < all.Length; i++)
+                // 通勤两列不用传（它们不是求和型，ShareKey 也不会让它们走到这里）；
+                // 「就业相关」必须传：它的「区域工人数」子模式是求和型，要靠它算占比分母
+                t += SortValue(_sortKey, all[i], gdp, pop, landD, m2, delta, builtS, incomeD, investD,
+                    null, null, employD);
+            return t;
+        }
+
         /// <summary>地均GDP = GDP / 面积(m²)，用于排序（0 时返回 0）。</summary>
         private static double GdpPerArea(ushort did, double[] gdp, double[] m2)
         {
@@ -1200,8 +1770,12 @@ namespace DistrictFinanceManager
             return m2;
         }
 
-        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null, double[] delta = null, double[] built = null, double[] income = null, double[] invest = null)
+        private static double SortValue(int key, ushort did, double[] gdp, long[] pop, double[] land = null, double[] m2 = null, double[] delta = null, double[] built = null, double[] income = null, double[] invest = null, double[] growth = null, double[] commute = null, double[] localEmp = null, double[] commuteTime = null)
         {
+            // 增速模式：调用方把该键的增速数组传进来（自身 / 聚合由调用方按视图决定），整行直接用增速%。
+            // 算不了增速的键（7=建筑价值增量、10=自定义投资额、11=通勤距离、12=本地就业率、13=通勤时间）
+            // 调用方传 null → 原样落到下面的原口径。
+            if (growth != null) return growth[did];
             switch (key)
             {
                 case 1: return pop[did];
@@ -1217,12 +1791,131 @@ namespace DistrictFinanceManager
                 // 自定义政府投资额：调用方决定传**自身**还是**聚合**
                 // （约定：平铺「所有区划」列表传自身，层级树/单级排名/组合传聚合）
                 case 10: return invest != null ? invest[did] : 0.0;
+                // 平均通勤距离（km）/ 本地就业率（%）：居住地口径，平铺列表传自身、层级树/排名传聚合
+                case 11: return commute != null ? commute[did] : 0.0;
+                case 12: return localEmp != null ? localEmp[did] : 0.0;
+                case 13: return commuteTime != null ? commuteTime[did] : 0.0;   // 平均通勤时间（分钟）
                 default: return gdp[did];
             }
         }
 
-        private string FormatSortValue(double value)
+        /// <summary>
+        /// 排序方向 + 「0 排最后」的统一比较器（2026-09-27 用户定）：
+        ///   · 键 11（平均通勤距离）/ 13（平均通勤时间）**越短越好 → 升序**；
+        ///   · 值 **0 = 没有数据**（区划没有就业居民 / 这一轮没采到通勤趟数），**无论什么方向一律沉底**，
+        ///     并且显示为**白色**（见 SortColor）—— 否则它们会挤在「最近 / 最快」的前几名里，看着像好区划。
+        ///   · 其余键维持原来的**降序**（值越大越靠前）。
+        /// ⚠️ 「0 沉底」只对 11/13 生效：键 7（建筑价值增量）/ 10（投资额）可以为负，0 是有意义的值。
+        /// </summary>
+        private int CompareRows(double a, double b)
         {
+            if (_sortKey == 11 || _sortKey == 13)
+            {
+                bool az = a <= 0.0, bz = b <= 0.0;
+                if (az != bz) return az ? 1 : -1;   // 无数据的沉到最后
+                return a.CompareTo(b);              // 升序：越短越好
+            }
+            return b.CompareTo(a);                  // 其余键：降序
+        }
+
+        /// <summary>
+        /// 当前口径下的**自身**平均通勤时间数组（分钟）：开了「最长10%」→ 每区划留存样本里最大的 10%
+        /// 的平均（`GetCommuteTopTime`），否则→ 全部样本的均值。**列表 / 排名 / 组合都要走这两个助手**，
+        /// 别直接调 `GetCommuteTime()` —— 直接调会让四处口径不一致（用户 2026-09-27 加「最长10%」时定的）。
+        /// </summary>
+        private double[] SelfCommuteTimes()
+        {
+            DistrictFinanceCalculator c = _hub.Calculator;
+            return _commuteTopMode ? c.GetCommuteTopTime() : c.GetCommuteTime();
+        }
+
+        /// <summary>当前口径下的**聚合**（自身 + 全部下辖）平均通勤时间数组（分钟）。</summary>
+        private double[] AggCommuteTimes()
+        {
+            DistrictFinanceCalculator c = _hub.Calculator;
+            return _commuteTopMode ? c.GetAggregateCommuteTopTime() : c.GetAggregateCommuteTime();
+        }
+
+        // ================== 键 12「就业相关」的两个子口径（用户 2026-09-28）==================
+        // ⚠️ 与「最长10%」同规矩：**取这一列的四个地方（所有区划 / 排名 / 聚合 / 组合）一律走下面两个助手**，
+        //    别再直接调 GetLocalEmploymentRate / GetAggregateLocalEmploymentRate —— 那会让子口径不一致
+        //    （有的地方显示就业率、有的地方显示工人数）。
+
+        /// <summary>当前子口径下的**自身**值数组（本地就业率 % / 区域工人数 人）。</summary>
+        private double[] SelfEmployValues()
+        {
+            DistrictFinanceCalculator c = _hub.Calculator;
+            return _employWorkers ? c.GetDistrictPanelWorkers() : c.GetLocalEmploymentRate();
+        }
+
+        /// <summary>当前子口径下的**聚合**（自身 + 全部下辖）值数组。</summary>
+        private double[] AggEmployValues()
+        {
+            DistrictFinanceCalculator c = _hub.Calculator;
+            return _employWorkers ? c.GetAggregatePanelWorkers() : c.GetAggregateLocalEmploymentRate();
+        }
+
+        /// <summary>键 12 当前子口径下**能否算增速**：只有「区域工人数」能（走周库 v8 的 PanelWorkers 列）；
+        /// 「本地就业率」是比值，没有增速（与 11/13 一样保持原口径）。</summary>
+        private bool EmployGrowthSupported()
+        {
+            return _sortKey != 12 || _employWorkers;
+        }
+
+        /// <summary>增速数组（当前键 + 当前子口径）；算不了返回 null（调用方据此退回原口径）。</summary>
+        private double[] GrowthForCurrentKey(bool aggregate)
+        {
+            if (!EmployGrowthSupported()) return null;
+            return _hub.Calculator.GetGrowth(_sortKey, aggregate);
+        }
+
+        /// <summary>增速的「实时值 / 基准值」两列（组合视图要按成员先求和再算增速）；算不了返回 false。</summary>
+        private bool GrowthRawForCurrentKey(bool aggregate, out double[] live, out double[] basev)
+        {
+            live = null; basev = null;
+            if (!EmployGrowthSupported()) return false;
+            return _hub.Calculator.GrowthRaw(_sortKey, aggregate, out live, out basev);
+        }
+
+        /// <summary>键 12 当前子口径在**图例/标题**里用的名字（键名本身统一叫「就业相关」）。</summary>
+        private string EmployModeName()
+        {
+            return _employWorkers ? Loc.T("区域工人数", "District workers")
+                                  : Loc.T("本地就业率", "Local employment");
+        }
+
+        /// <summary>
+        /// 「平均通勤时间」的提示文字（其它键返回空串）。用户 2026-09-27：这段提示**保留**，但要
+        /// **单独占一行并自动折行** —— 不能挂到列表标题后面（右边被「更多 ▾」占掉 54px，会溢出/被裁）。
+        /// 由 `DrawCommuteControls()` 在按钮那一行下面绘制。
+        /// </summary>
+        private string CommuteHint()
+        {
+            if (_sortKey != 13) return "";
+            // ⚠️ **手动断成三行**（用户 2026-09-27：「还是长了…文字要分行」）：一行一个意思，
+            //    每行都短到能整行放下（右边还要给「更多 ▾」那 54px 让位），别写成一大句。
+            //    第 3 行是**换算口径**（用户 2026-09-27 要求写明）：时间按 realtime 设定 60 模拟帧 = 10 秒。
+            return Loc.T("⚠ 逐帧跟踪在途市民，性能消耗较大。\n攒够样本（≥ 就业居民数÷8）才显示，不足＝白色 0。\n时间按 realtime 换算：60 模拟帧 = 10 秒（贴近现实）。",
+                         "[!] Follows travelling citizens (CPU-heavy).\nShows once it has enough samples (>= 1/8 of its employed residents), below that: white 0.\nTime follows the realtime setting: 60 sim frames = 10 s (closer to real life).");
+        }
+
+        /// <summary>列表标题里的方向词（键 11/13 是升序，其余降序）。</summary>
+        private string SortDirWord()
+        {
+            bool asc = (_sortKey == 11 || _sortKey == 13);
+            return Loc.IsEn ? (asc ? "asc" : "desc") : (asc ? "升序" : "降序");
+        }
+
+        private string FormatSortValue(double value, double progress = -1.0)
+        {
+            // 增速模式：值是百分数（SortValue 已换成增速）。带符号、**两位小数**（图例也是两位，两边一致）；
+            // ±0.005% 以内归零，避免显示成「-0.00%」
+            if (GrowthActive(_sortKey))
+            {
+                double g = System.Math.Abs(value) < 0.005 ? 0.0 : value;
+                string gs = g > 0 ? "+" : (g < 0 ? "-" : "");
+                return gs + System.Math.Abs(g).ToString("0.00") + "%";
+            }
             string cur = CurrencySymbol();
             switch (_sortKey)
             {
@@ -1246,12 +1939,41 @@ namespace DistrictFinanceManager
                         string sign = v > 0 ? "+" : (v < 0 ? "-" : "");
                         return sign + cur + F(System.Math.Abs(v));
                     }
+                case 11: return value.ToString("0.00") + Loc.T(" km", " km");   // 平均通勤距离
+                case 12: return _employWorkers
+                    ? value.ToString("N0") + Loc.T(" 人", " workers")           // 区域工人数（原版面板口径）
+                    : value.ToString("0.0") + "%";                              // 本地就业率
+                case 13: // 平均通勤时间（现实等效）
+                    {
+                        string s13 = value.ToString("0.0") + Loc.T(" 分钟", " min");
+                        // **白色 0＝还没攒够门槛**的行，后面注明已统计的百分比（用户 2026-09-27：
+                        // 「在白色状态的后面注明已统计的百分比」）—— 让人知道还要等多久。
+                        // progress < 0 = 不适用（该区划没有就业居民），不注。
+                        if (value <= 0.0 && progress >= 0.0)
+                            s13 += Loc.T(" 已统计 ", " counted ") + progress.ToString("0") + "%";
+                        return s13;
+                    }
                 default: return cur + F((long)value);
             }
         }
 
-        private static Color SortColor(int key, double value)
+        /// <summary>
+        /// 「增速」当前对某个键**是否真的生效**：键 12（就业相关）只有「区域工人数」子模式能算增速，
+        /// 「本地就业率」是比值 → 不算（用户 2026-09-28 选定）。**取色 / 标签 / 图例 / 格式化一律用它**，
+        /// 只要有一处漏判，就会出现"值是原值、颜色却按增速%上色"这种数字与颜色对不上的情况。
+        /// </summary>
+        private bool GrowthActive(int key)
         {
+            if (!_growthMode) return false;
+            if (!DistrictFinanceCalculator.GrowthSupported(key)) return false;
+            return key != 12 || _employWorkers;
+        }
+
+        /// <summary>按排序键取热力色。**非 static**：增速模式下要按 _growthMode 换成百分数档位。</summary>
+        private Color SortColor(int key, double value)
+        {
+            // 增速模式：能算增速的键一律走「以 0 为中心」的百分数分档（传进来的 value 已是增速%）
+            if (GrowthActive(key)) return GrowthColor(value);
             if (key == 1) return PopColor((long)value);
             if (key == 2) return GdpPerCapitaColor(value);
             if (key == 3) return LandColor(value);
@@ -1262,10 +1984,24 @@ namespace DistrictFinanceManager
             if (key == 8) return BuiltAreaColor(value);    // 建成区面积：km² 分级，阈值=区域面积档位减半
             if (key == 9) return IncomePerCapitaColor(value); // 人均可支配收入
             if (key == 10) return BuiltDeltaColor(value);     // 自定义政府投资额：复用建筑价值增量的配色
+            // 通勤距离 / 时间：**0 = 无数据**（没有就业居民 / 没采到趟数）→ 白字 + 排最后（见 CompareRows）
+            if (key == 11) return value > 0.0 ? CommuteColor(value) : Color.white;
+            if (key == 12) return _employWorkers ? WorkersColor(value) : LocalEmpColor(value);
+                                                               // 12：「区域工人数」（人口档位÷2，人） 或 「本地就业率」（%）
+            if (key == 13) return value > 0.0 ? CommuteTimeColor(value) : Color.white;
             return GdpColor(value);
         }
 
-        private static string SortLabel(int key)
+        /// <summary>排序键名。增速模式下给「能算增速」的键统一加后缀（表头/图例标题都走这里）。</summary>
+        private string SortLabel(int key)
+        {
+            string n = SortLabelCore(key);
+            if (GrowthActive(key))
+                return n + Loc.T("增速", " Δ%");
+            return n;
+        }
+
+        private static string SortLabelCore(int key)
         {
             switch (key)
             {
@@ -1279,6 +2015,10 @@ namespace DistrictFinanceManager
                 case 8: return Loc.T("建成区面积", "Built-up area");
                 case 9: return Loc.T("人均可支配", "Disposable/capita");
                 case 10: return Loc.T("自定义政府投资额", "Custom gov. investment");
+                case 11: return Loc.T("平均通勤距离", "Avg commute");
+                case 12: return Loc.T("就业相关", "Employment");   // 键名统一叫「就业相关」（用户 2026-09-28）；
+                                                                   // 子口径（本地就业率/区域工人数）由图例标题与两个按钮体现
+                case 13: return Loc.T("平均通勤时间", "Avg commute time");
                 default: return "GDP";
             }
         }
@@ -1305,35 +2045,54 @@ namespace DistrictFinanceManager
             // 「所有区划」是平铺列表 → 自定义投资额用**自身**值（层级型视图才用聚合）
             double[] investD = InvestToDisplay(GetInvestSelf());
             ushort[] all = _hub.GetVanillaDistricts();
+            // 「所有区划」是平铺列表 → 增速用**自身**口径
+            double[] growth = _growthMode ? GrowthForCurrentKey(false) : null;
+            // 通勤距离 / 本地就业率（居住地口径）：平铺列表用**自身**值
+            double[] commuteD = _hub.Calculator.GetCommuteDistance();
+            double[] localEmpD = SelfEmployValues();   // 键 12 子口径：本地就业率 / 区域工人数
+            double[] commuteTimeD = SelfCommuteTimes();
+            double[] commuteProg = _hub.Calculator.GetCommuteProgress();   // 白色 0 的行要注明「已统计 x%」
 
             var items = new List<KeyValuePair<ushort, double>>();
             foreach (ushort did in all)
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2, delta, builtS, incomeD, investD)));
+                items.Add(new KeyValuePair<ushort, double>(did, SortValue(_sortKey, did, gdp, pop, landD, m2, delta, builtS, incomeD, investD, growth, commuteD, localEmpD, commuteTimeD)));
             }
-            items.Sort((a, b) => b.Value.CompareTo(a.Value)); // 降序
+            items.Sort((a, b) => CompareRows(a.Value, b.Value)); // 方向见 CompareRows（11/13 升序、0 沉底）
 
             float contentH = HEADER_H + items.Count * NODE_H + 24f;
             _sortScroll = GUI.BeginScrollView(list, _sortScroll, new Rect(0, 0, list.width - 20, contentH));
             float lw = list.width - 20;
             float cy = DrawHeader(0, lw,
-                Loc.T("— 各区划 " + SortLabel(_sortKey) + " 排名（降序，点击查看）—",
-                      "— All districts by " + SortLabel(_sortKey) + " (desc, click to view) —"));
+                Loc.T("— 各区划 " + SortLabel(_sortKey) + " 排名（" + SortDirWord() + "，点击查看）—",
+                      "— All districts by " + SortLabel(_sortKey) + " (" + SortDirWord() + ", click to view) —"));
 
-            double totalGdp = TotalGdp(gdp);
-            long totalPop = TotalPop(pop);
+            // 占比分母：**筛选了区划时**用该区划的**聚合值**（自身 + 全部下辖），否则用全图自身值合计。
+            // 分母 > 0 才显示（增量 / 投资额这类可以为负，负的分母算占比没意义）。
+            // 增速模式下这一行显示的是增速%，占比不适用。
+            double shareTotal = 0.0;
+            if (growth == null && ShareKey(_sortKey))
+            {
+                ushort fid = FilterDistrictId();
+                shareTotal = fid != 0
+                    ? FilterAggDenom(fid)
+                    : TotalSelfValue(gdp, pop, landD, m2, delta, builtS, incomeD, investD, localEmpD);
+            }
+            bool showShare = shareTotal > 0.0;
             for (int i = 0; i < items.Count; i++)
             {
                 ushort did = items[i].Key;
                 string name = _hub.GetVanillaDistrictName(did);
                 bool selected = did == _hub.SelectedID;
-                string share = "";
-                if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(gdp[did], totalGdp);
-                else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(pop[did], totalPop);
+                // 分子就是这一行**显示的那个自身值**，与分母同一口径，不会出现「显示 A、占比按 B 算」
+                string share = showShare
+                    ? Loc.T("  占比 ", "  share ") + Share(items[i].Value, shareTotal)
+                    : "";
                 string line = (selected ? "▶ " : "  ")
-                    + string.Format("{0}. {1}    {2}", i + 1, name, FormatSortValue(items[i].Value)) + share;
+                    + string.Format("{0}. {1}    {2}", i + 1, name,
+                        FormatSortValue(items[i].Value, _sortKey == 13 ? commuteProg[did] : -1.0)) + share;
                 Color old = GUI.color;
                 GUI.color = SortColor(_sortKey, items[i].Value);
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
@@ -1376,13 +2135,25 @@ namespace DistrictFinanceManager
             // 单级排名是层级型视图 → 本列表用**聚合**；「直辖」附加条目与其它指标一样用**自身**
             double[] aggInvestD = InvestToDisplay(GetAggregateInvest());
             double[] selfInvestD = InvestToDisplay(GetInvestSelf());
+            // 增速两套：本列表的区划用**聚合**口径，「直辖」附加条目与其它指标一样用**自身**口径
+            double[] growthAgg = _growthMode ? GrowthForCurrentKey(true) : null;
+            double[] growthSelf = _growthMode ? GrowthForCurrentKey(false) : null;
+            // 通勤距离 / 本地就业率（居住地口径）：本列表用**聚合**（子树内 OD 对和 ÷ 子树就业居民），直辖行用**自身**
+            double[] aggCommuteD = _hub.Calculator.GetAggregateCommuteDistance();
+            double[] aggLocalEmpD = AggEmployValues();   // 键 12 子口径
+            double[] selfCommuteD = _hub.Calculator.GetCommuteDistance();
+            double[] selfLocalEmpD = SelfEmployValues();   // 键 12 子口径
+            double[] aggCommuteTime = AggCommuteTimes();
+            double[] selfCommuteTime = SelfCommuteTimes();
+            double[] aggCommuteProg = _hub.Calculator.GetAggregateCommuteProgress();
+            double[] selfCommuteProg = _hub.Calculator.GetCommuteProgress();
 
             var items = new List<RankEntry>();
             foreach (ushort did in _hub.Hierarchy.GetDistrictsByLevel(level))
             {
                 if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                 if (!PassFilter(did)) continue;
-                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2, aggDelta, aggBuiltS, aggIncomeD, aggInvestD), parentLevel = false });
+                items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, agg, aggPop, aggLandD, aggM2, aggDelta, aggBuiltS, aggIncomeD, aggInvestD, growthAgg, aggCommuteD, aggLocalEmpD, aggCommuteTime), parentLevel = false });
             }
 
             // 加入上一级节点（直辖）：数值用其自身，不聚合
@@ -1394,11 +2165,11 @@ namespace DistrictFinanceManager
                 {
                     if (string.IsNullOrEmpty(_hub.GetVanillaDistrictName(did))) continue;
                     if (!PassFilter(did)) continue;
-                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2, selfDelta, selfBuiltS, selfIncomeD, selfInvestD), parentLevel = true });
+                    items.Add(new RankEntry { id = did, value = SortValue(_sortKey, did, selfGdp, selfPop, selfLandD, selfM2, selfDelta, selfBuiltS, selfIncomeD, selfInvestD, growthSelf, selfCommuteD, selfLocalEmpD, selfCommuteTime), parentLevel = true });
                 }
             }
 
-            items.Sort((a, b) => b.value.CompareTo(a.value)); // 降序
+            items.Sort((a, b) => CompareRows(a.value, b.value)); // 方向见 CompareRows（11/13 升序、0 沉底）
 
             float contentH = HEADER_H + items.Count * NODE_H + 24f;
             _sortScroll = GUI.BeginScrollView(list, _sortScroll, new Rect(0, 0, list.width - 20, contentH));
@@ -1406,6 +2177,16 @@ namespace DistrictFinanceManager
             string head = Loc.T("— " + LevelName(level) + " 排名（聚合" + SortLabel(_sortKey) + "，点击查看）—",
                                 "— " + LevelName(level) + " ranking (aggregate " + SortLabel(_sortKey) + ", click to view) —");
             float cy = DrawHeader(0, lw, head);
+
+            // 有**区划**筛选时，每行的聚合值后面跟一个「占筛选区划聚合值的比例」
+            // （例：筛选「a 区」后看乡镇视图 → 每个乡镇后面显示占 a 区聚合值的比例）。
+            // 只在求和型指标上显示。
+            // 「直辖」附加条目**也显示**：它的值是**自身值**，也就是筛选区划「直辖的那部分」，
+            // 所以 a 的直辖行占比 = a 自身 ÷ a 聚合（自身+全部下辖）—— 反映 a 有多少是自己直管、
+            // 有多少交给了下级。筛选 a 时上一级里只有 a 能通过 PassFilter，所以那行就是 a 本人。
+            ushort fid = FilterDistrictId();
+            double denom = FilterAggDenom(fid);
+            bool showShare = denom > 0.0 && growthAgg == null;
 
             int rank = 0;
             for (int i = 0; i < items.Count; i++)
@@ -1417,8 +2198,14 @@ namespace DistrictFinanceManager
                 string label = items[i].parentLevel
                     ? (name + Loc.T("直辖", " Direct-admin"))
                     : name;
+                // 分母是筛选区划的聚合值，分子就是这一行显示的那个值（直辖行是自身值）—— 同一口径，不另算
+                string share = showShare
+                    ? Loc.T("  占比 ", "  share ") + Share(items[i].value, denom)
+                    : "";
                 string line = (selected ? "▶ " : "  ")
-                    + string.Format("{0}. {1}    {2}", rank, label, FormatSortValue(items[i].value));
+                    + string.Format("{0}. {1}    {2}", rank, label,
+                        FormatSortValue(items[i].value, _sortKey == 13
+                            ? (items[i].parentLevel ? selfCommuteProg[did] : aggCommuteProg[did]) : -1.0)) + share;
                 Color old = GUI.color;
                 GUI.color = SortColor(_sortKey, items[i].value);
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
@@ -1458,6 +2245,10 @@ namespace DistrictFinanceManager
             // 不做层级聚合（本视图的标题与说明也是这么写的，且避免父子同组时重复计入）
             double[] investRaw = InvestToDisplay(GetInvestSelf());
             ushort[] all = _hub.GetVanillaDistricts();
+            // 增速：组合用**成员自身值**口径的当前值/基准值（求和后现算，见 GroupValue）
+            double[] gLive, gBase;
+            if (!_growthMode || !GrowthRawForCurrentKey(false, out gLive, out gBase))
+            { gLive = null; gBase = null; }
             float lw = list.width - 20;
             float x0 = list.x;
             float cy = list.y;
@@ -1503,9 +2294,17 @@ namespace DistrictFinanceManager
             // 组合排序列表（固定；右键组合名收起/展开成员）
             double totalGdp = TotalGdp(gdp);
             long totalPop = TotalPop(pop);
+            // 「区域工人数」的占比分母（全图自身值合计）——只在工人子模式下用到
+            double[] workSelf = _hub.Calculator.GetDistrictPanelWorkers();
+            double totalWork = (_sortKey == 12 && _employWorkers) ? TotalSumD(workSelf) : 0.0;
+            // 通勤距离 / 本地就业率：**每帧按成员预算一次**，排序比较器与行渲染都只读（见 GroupValue 注释）
+            double[] gCommute, gLocalEmp, gCommuteTime, gCommuteProg;
+            BuildGroupCommuteValues(out gCommute, out gLocalEmp, out gCommuteTime, out gCommuteProg);
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
-            order.Sort((a, b) => GroupValue(b, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw).CompareTo(GroupValue(a, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw)));
+            order.Sort((a, b) => CompareRows(
+                GroupValue(a, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw, gLive, gBase, gCommute, gLocalEmp, gCommuteTime),
+                GroupValue(b, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw, gLive, gBase, gCommute, gLocalEmp, gCommuteTime)));
 
             int toDelete = -1;
             for (int r = 0; r < order.Count; r++)
@@ -1513,12 +2312,20 @@ namespace DistrictFinanceManager
                 int gi = order[r];
                 GroupData g = Groups[gi];
                 bool active = gi == _activeGroupIdx;
-                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw);
+                double gval = GroupValue(gi, gdp, pop, landRaw, areaRaw, deltaRaw, builtRaw, incomeRaw, investRaw, gLive, gBase, gCommute, gLocalEmp, gCommuteTime);
                 string share = "";
-                if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(GroupGdp(gi, gdp), totalGdp);
-                else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(GroupPop(gi, pop), totalPop);
+                // 增速模式下这一行显示的是增速%，占比（哪来的份额）不适用
+                if (gLive == null)
+                {
+                    if (_sortKey == 0) share = Loc.T("  占比 ", "  share ") + Share(GroupGdp(gi, gdp), totalGdp);
+                    else if (_sortKey == 1) share = Loc.T("  占比 ", "  share ") + Share(GroupPop(gi, pop), totalPop);
+                    // 「就业相关 · 区域工人数」（用户 2026-09-28：组合后面也要写占比）——
+                    // 成员自身值合计 ÷ 全图合计（与「所有区划」的占比同一套口径）
+                    else if (_sortKey == 12 && _employWorkers && totalWork > 0.0)
+                        share = Loc.T("  占比 ", "  share ") + Share(GroupSumD(gi, workSelf), totalWork);
+                }
                 string line = (active ? "▶ " : "  ") + (r + 1) + ". " + g.Name
-                    + "  " + FormatSortValue(gval) + share
+                    + "  " + FormatSortValue(gval, _sortKey == 13 ? gCommuteProg[gi] : -1.0) + share
                     + "  " + Loc.T("成员", "mem") + g.Members.Count;
                 Rect rowRect = new Rect(x0, cy, lw - 146, NODE_H);
                 Color old = GUI.color;
@@ -1606,9 +2413,9 @@ namespace DistrictFinanceManager
         /// 若显示也乘 N，则「月视图里录一笔、切到周视图看」会变成 1/N² 而不是 1/N（实测差 4 倍），
         /// 与「建筑价值增量」切周期时按 1/N 缩放的规律对不上。
         ///
-        /// ⚠️ 仍**刻意与「建筑价值增量」的档位共用价格系数 `LandMult()`**
-        /// （420 / 60，见 GetBuiltDeltaDisplayTiers）：若改用 GetDisplayFactor()（2625/375）
-        /// 会与图例档位不一致，**数字和颜色对不上**。
+        /// ⚠️ 与「建筑价值增量」共用**价格系数** `LandMult()`（420 / 60）：图例、取值、录入三处同一套，
+        /// 都是地价那一族的口径（增量 = 面积 × 显示地价）。⚠️ 别擅自换到 GDP 的流量系数上
+        /// （2026-09-28 试过一次，被用户否掉：「地价视图的比例是不一样的，你给改了干啥」）。
         /// </summary>
         private static double InvestMult()
         {
@@ -1676,7 +2483,7 @@ namespace DistrictFinanceManager
         {
             double[] r = new double[256];
             if (_hub == null || _hub.Investments == null || _hub.Investments.Count == 0) return r;
-            long curW = (long)GameWeek.CurrentWeek;
+            long curW = (long)InvestWeek.Now;   // 记账刻度（帧周 / RealTime 日历周），与录入同源
             long lo = curW + 1 - CurrentPeriodWeeks();   // 窗口下界（含）：最近 x 周
             foreach (KeyValuePair<ushort, List<InvestInstallment>> kv in _hub.Investments)
             {
@@ -1700,7 +2507,7 @@ namespace DistrictFinanceManager
             if (_hub == null || _hub.Investments == null || id == 0) return;
             List<InvestInstallment> list;
             if (!_hub.Investments.TryGetValue(id, out list) || list == null) return;
-            long curW = (long)GameWeek.CurrentWeek;
+            long curW = (long)InvestWeek.Now;   // 记账刻度（帧周 / RealTime 日历周），与录入同源
             for (int i = 0; i < list.Count; i++)
                 if ((long)list[i].Week > curW) { rawSum += list[i].Amount; count++; }
         }
@@ -1786,10 +2593,20 @@ namespace DistrictFinanceManager
             if (_investEditTarget != 0 && string.IsNullOrEmpty(_hub.GetVanillaDistrictName(_investEditTarget)))
                 _investEditTarget = 0;
 
+            // 记账刻度提示：勾了「跟随 RealTime 日历」时把「周」的含义写明
+            // （否则「1 周」到底是 4096 模拟帧还是游戏日历上的一周，差得很远）。
+            // 单开一行（_diag 小字），不挤进标题行 —— 标题本来就快占满宽度了。
             GUI.Label(new Rect(x0, cy, lw, HEADER_H),
                 Loc.T("— 自定义政府投资额（点击下方区划输入；按最近 " + weeks + " 周已计入额降序，可输入负数）—",
                       "— Custom government investment (click a district to enter; sorted by the amount credited in the last " + weeks + " weeks; negatives allowed) —"), _hdr);
             cy += HEADER_H + GAP;
+            if (InvestWeek.FollowRealTime)
+            {
+                GUI.Label(new Rect(x0, cy, lw, HEADER_H),
+                    Loc.T("※ 记账刻度：RealTime 日历周（游戏里显示的日期；可在「设置」里改回原版帧周）",
+                          "Note: recording ruler = RealTime calendar weeks (the in-game date; change it in Settings)"), _diag);
+                cy += HEADER_H;
+            }
 
             // ---- 输入行：左 Label + 输入框 + [k][m][b] + [确定]（仿组合命名行的横排）----
             GUI.Label(new Rect(x0, cy, 66, BTN_H), Loc.T("投资额:", "Amount:"), _fl);
@@ -1838,7 +2655,7 @@ namespace DistrictFinanceManager
                     // 窗口装满分期时 4 份的和 = 输入额 / LandMult()，再 ×LandMult() 正好还原成输入额。
                     double f = InvestMult();
                     double part = (f != 0.0) ? amt / f : amt;
-                    uint curW = GameWeek.CurrentWeek;
+                    uint curW = InvestWeek.Now;   // 记账刻度：默认原版帧周；勾选后 = RealTime 日历周
 
                     List<InvestInstallment> insts;   // 不能叫 list：本方法的入参也叫 list(Rect)
                     if (!_hub.Investments.TryGetValue(_investEditTarget, out insts) || insts == null)
@@ -2128,11 +2945,106 @@ namespace DistrictFinanceManager
             }
         }
 
+        /// <summary>
+        /// 组合的通勤类指标（**居住地口径**），每帧按成员预算一次：
+        ///   · 平均通勤距离（km） = Σ成员(距离×就业居民数) ÷ Σ成员就业居民数 —— 按就业居民加权，
+        ///     不能对成员各自的平均值再求平均（会被小成员带偏，与人均可支配同一道理）；
+        ///   · 本地就业率（%） = 成员集**内部**的 OD 对和 ÷ Σ成员就业居民数 ——
+        ///     成员之间跨区上班**也算本地**（用户 2026-09-27 定的规则，与层级聚合一致）；
+        ///   · 平均通勤时间（分钟）= Σ成员(时间×趟数) ÷ Σ成员趟数（与距离同一套加权）。
+        /// </summary>
+        private void BuildGroupCommuteValues(out double[] commute, out double[] localEmp, out double[] commuteTime,
+            out double[] commuteProg)
+        {
+            commute = new double[Groups.Count];
+            localEmp = new double[Groups.Count];
+            commuteTime = new double[Groups.Count];
+            commuteProg = new double[Groups.Count];   // 「统计进度」%：白色 0 的行注明「已统计 x%」
+            DistrictFinanceCalculator calc = _hub.Calculator;
+            double[] dist = calc.GetCommuteDistance();
+            long[] cnt = calc.GetCommuteCount();
+            double[] time = _commuteTopMode ? calc.GetCommuteTopTime() : calc.GetCommuteTime();
+            long[] timeCnt = calc.GetCommuteTimeCount();
+            // 「区域工人数」子模式要用它（成员自身值求和；非工人模式用不到，白拿一次缓存数组，代价可忽略）
+            double[] workSelf = calc.GetDistrictPanelWorkers();
+            for (int gi = 0; gi < Groups.Count; gi++)
+            {
+                GroupData g = Groups[gi];
+                if (g.Members == null || g.Members.Count == 0) continue;
+                // Members 是 HashSet<ushort>（不能下标）→ 先摊平成 List 再做成员×成员的 OD 双重求和
+                List<ushort> ms = new List<ushort>();
+                foreach (ushort m in g.Members) if (m < 256) ms.Add(m);
+                if (ms.Count == 0) continue;
+                double wsum = 0.0;   // Σ 距离 × 就业居民数
+                long total = 0;      // Σ 就业居民数
+                double tsum = 0.0;   // Σ 通勤时间 × 趟数
+                long ttotal = 0;     // Σ 趟数
+                for (int m = 0; m < ms.Count; m++)
+                {
+                    wsum += dist[ms[m]] * cnt[ms[m]];
+                    total += cnt[ms[m]];
+                    tsum += time[ms[m]] * timeCnt[ms[m]];
+                    ttotal += timeCnt[ms[m]];
+                }
+                // 时间×趟数 ÷ 趟数 → 分钟；门槛与计算器一致：样本数 ≥ 就业居民数÷8（and 条件）。
+                // time[] 已经按当前口径取好（均值 / 最长10%，见上面那一行三元），这里只负责按趟数加权。
+                if (ttotal > 0
+                    && DistrictFinanceCalculator.CommuteSamplesEnough(ttotal, total))
+                    commuteTime[gi] = tsum / ttotal;
+                // 进度 = 成员趟数 ÷ 成员门槛（Σ就业居民 ÷ 8）：没到门槛时面板注明「已统计 x%」。
+                // 与计算器那边（自身/聚合）同一套算法，只是把「一个区划」换成「成员集」。
+                if (total > 0)
+                {
+                    long needT = DistrictFinanceCalculator.CommuteNeed(total);
+                    commuteProg[gi] = ttotal >= needT ? 100.0 : (double)ttotal * 100.0 / needT;
+                }
+                else commuteProg[gi] = -1.0;   // 成员没有就业居民 → 这一项不适用
+                if (total <= 0) continue;
+                commute[gi] = wsum / total;   // 距离×人数 ÷ 人数 → km
+                // 键 12「就业相关」的第二个子口径：**区域工人数** = 成员**自身**值之和
+                // （原版区划面板口径；组合一律用成员自身值合计，见 GroupValue 的约定）。
+                if (_employWorkers)
+                {
+                    double wsumSelf = 0.0;
+                    for (int m = 0; m < ms.Count; m++) wsumSelf += workSelf[ms[m]];
+                    localEmp[gi] = wsumSelf;
+                    continue;
+                }
+                long inside = 0;              // 成员集内部的 OD 对和
+                for (int a = 0; a < ms.Count; a++)
+                    for (int b = 0; b < ms.Count; b++)
+                        inside += calc.GetOdCount(ms[a], ms[b]);
+                localEmp[gi] = (double)inside / total * 100.0;
+            }
+        }
+
         /// <summary>组合的统计值（按排序依据）：GDP/人口为成员求和，人均=和/和；
         /// 地价为成员面积加权平均地价再随模式换算显示（避免把地价当 GDP 求和导致异常高）。</summary>
-        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, double[] areaRaw, double[] delta, double[] built, double[] income, double[] invest)
+        private double GroupValue(int idx, double[] gdp, long[] pop, long[] landRaw, double[] areaRaw, double[] delta, double[] built, double[] income, double[] invest, double[] gLive = null, double[] gBase = null, double[] gCommute = null, double[] gLocalEmp = null, double[] gCommuteTime = null)
         {
             GroupData g = Groups[idx];
+
+            // 通勤距离 / 本地就业率（居住地口径）：调用方已按**成员集**预算好（见 BuildGroupCommuteValues）——
+            // 这两项都要「先按成员加权/求和再取比值」，不能像 GDP 那样逐成员求和；也绝不能放到排序比较器里
+            // 现算（成员数² × 比较次数）。所以直接取预算好的值。
+            if (_sortKey == 11 && gCommute != null && idx < gCommute.Length) return gCommute[idx];
+            if (_sortKey == 12 && gLocalEmp != null && idx < gLocalEmp.Length) return gLocalEmp[idx];
+            if (_sortKey == 13 && gCommuteTime != null && idx < gCommuteTime.Length) return gCommuteTime[idx];
+
+            // 增速模式：组合的增速 = (Σ成员当前值 − Σ成员基准值) ÷ Σ成员基准值 ——
+            // **不能对成员各自的增速求平均**（会被小基数成员带偏），必须按总量算
+            // （与人均可支配的「Σ分子 ÷ Σ人口」同一思路）。gLive/gBase 为 null = 该键算不了增速 → 落回原口径。
+            if (gLive != null && gBase != null)
+            {
+                double gl = 0, gb = 0;
+                foreach (ushort m in g.Members)
+                {
+                    if (m >= gLive.Length || m >= gBase.Length) continue;
+                    gl += gLive[m];
+                    gb += gBase[m];
+                }
+                return gb > 0 ? (gl - gb) / gb * 100.0 : 0.0;
+            }
 
             // 地价：面积加权平均（kr/m²），×LandMult 后与列表/图例同一口径
             if (_sortKey == 3)
@@ -2209,6 +3121,25 @@ namespace DistrictFinanceManager
             long s = 0;
             foreach (ushort m in Groups[gi].Members) s += pop[m];
             return s;
+        }
+
+        /// <summary>组合的成员**自身值**求和（double 版，给「区域工人数」用；与 GroupPop 同规矩）。</summary>
+        private double GroupSumD(int gi, double[] self)
+        {
+            double s = 0.0;
+            foreach (ushort m in Groups[gi].Members)
+                if (m < self.Length) s += self[m];
+            return s;
+        }
+
+        /// <summary>全图各原版区划的自身值合计（double 版，占比分母）。</summary>
+        private double TotalSumD(double[] self)
+        {
+            double t = 0.0;
+            ushort[] all = _hub.GetVanillaDistricts();
+            for (int i = 0; i < all.Length; i++)
+                if (all[i] < self.Length) t += self[all[i]];
+            return t;
         }
 
         /// <summary>数值对总量占比 × 100，格式如 "12.3%"。</summary>
@@ -2608,6 +3539,48 @@ namespace DistrictFinanceManager
             return TIER_COLORS[TIER_COLORS.Length - 1];
         }
 
+        /// <summary>
+        /// 平均通勤距离分档颜色（入参 = km，居住地口径）。
+        /// **色阶是反的**：通勤越近越好（用户 2026-09-27 定），所以距离越小取越靠后的颜色（紫端）、
+        /// 距离越大取越靠前的（红端）—— 与其它键「值越大越靠后」相反。
+        /// ⚠️ 图例必须用 `DrawLegend(..., invert: true)`，否则图例与列表颜色对不上。
+        /// </summary>
+        private static Color CommuteColor(double km)
+        {
+            int last = TIER_COLORS.Length - 1;
+            for (int i = 0; i < COMMUTE_TIERS.Length; i++)
+                if (km < COMMUTE_TIERS[i]) return TIER_COLORS[last - i];
+            return TIER_COLORS[0];
+        }
+
+        /// <summary>
+        /// 平均通勤时间分档颜色（入参 = 分钟）——**同样反向**：通勤越短越好（与 CommuteColor 一致），
+        /// 所以时间越短取越靠后的紫端。图例必须一起反（`DrawLegend(..., invert: true)`）。
+        /// </summary>
+        private static Color CommuteTimeColor(double minutes)
+        {
+            int last = TIER_COLORS.Length - 1;
+            for (int i = 0; i < COMMUTE_TIME_TIERS.Length; i++)
+                if (minutes < COMMUTE_TIME_TIERS[i]) return TIER_COLORS[last - i];
+            return TIER_COLORS[0];
+        }
+
+        /// <summary>本地就业率分档颜色（入参 = %）。</summary>
+        private static Color LocalEmpColor(double pct)
+        {
+            for (int i = 0; i < LOCAL_EMP_TIERS.Length; i++)
+                if (pct < LOCAL_EMP_TIERS[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
+        /// <summary>区域工人数分档颜色（入参 = 人）—— 与人口同一套取色方向，档位是人口的一半。</summary>
+        private static Color WorkersColor(double n)
+        {
+            for (int i = 0; i < WORKERS_TIERS.Length; i++)
+                if (n < WORKERS_TIERS[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
         /// <summary>人均可支配收入分档颜色：复用 TIER_COLORS 渐变（克朗/周·人，随显示模式缩放阈值）。</summary>
         private static Color IncomePerCapitaColor(double perCapita)
         {
@@ -2625,10 +3598,18 @@ namespace DistrictFinanceManager
             return ModSettings.PeriodName(p);
         }
 
-        /// <summary>建成区价值增量分档阈值：kr 基准 × 货币价格系数 × 周期周数（1/4/13/52/260）。</summary>
+        /// <summary>建筑价值增量（键 7）/ 自定义投资额（键 10）的分档阈值：kr 基准 × **流量系数**（与 GDP 同源，
+        /// 见 GetDisplayFactor）× 周期周数（1/4/13/52/260/520）。最大值 = GDP 图例的 1/3（用户 2026-09-28 要求）。</summary>
         private static double[] GetBuiltDeltaDisplayTiers()
         {
-            // 价格 × 周期周数（周/月/季/年/5年 = 1/4/13/52/260）—— 与基准周回退的周数同一个来源
+            // 价格 × 周期周数（周/月/季/年/5年/10年 = 1/4/13/52/260/520）—— **与地价同一套系数**。
+            //
+            // ⚠️ 2026-09-28 我一度把它改成与 GDP 同源的流量系数（想让"本图例最大值 = GDP 图例的 1/3"
+            //    在三种货币下都成立），**用户否掉了**：「地价视图的比例是不一样的，你给改了干啥」——
+            //    增量是「面积 × 地价」派生的量，必须留在地价那套系数里（420/60），否则与地价图的
+            //    数值比例对不上。保持本函数的 LandMult() 不动，只调档位表（见 BUILT_DELTA_TIERS 的注释：
+            //    表最大值 15,000,000，在**原版/周**下正好是 GDP 表的 1/3；人民币/美元下比值随系数走，
+            //    用户明确接受"不是 1/3"）。
             DistrictFinanceHub hub = DistrictFinanceHub.Instance;
             int period = (hub != null && hub.Settings != null) ? hub.Settings.DisplayPeriod : 0;
             double f = LandMult() * ModSettings.PeriodWeeks(period);
@@ -2647,22 +3628,78 @@ namespace DistrictFinanceManager
             return TIER_COLORS[TIER_COLORS.Length - 1];
         }
 
+        /// <summary>增速分档颜色（%/周期，负值走红端、正值走绿紫端；正负分界在 +0.5%/+1% 之间）。
+        /// 阈值随周期缩放（见 GetGrowthDisplayTiers），所以颜色含义在月/季/年下自动跟着变。</summary>
+        private static Color GrowthColor(double v)
+        {
+            double[] tiers = GetGrowthDisplayTiers();
+            for (int i = 0; i < tiers.Length; i++)
+                if (v < tiers[i]) return TIER_COLORS[i];
+            return TIER_COLORS[TIER_COLORS.Length - 1];
+        }
+
         /// <summary>绘制颜色图例：16 档颜色色块 + 各档阈值下限。long[]/double[] 共用一套模板（返回新 y）。</summary>
-        private float DrawLegend(float x, float y, float w, string title, long[] tiers)
+        private float DrawLegend(float x, float y, float w, string title, long[] tiers, bool invert = false)
         {
             string[] labels = new string[tiers.Length + 1];
             for (int i = 0; i < labels.Length; i++) labels[i] = LegendLabel(tiers, i);
-            return DrawLegendCore(x, y, w, title, labels);
+            return DrawLegendCore(x, y, w, title, labels, invert);
         }
 
-        private float DrawLegend(float x, float y, float w, string title, double[] tiers)
+        private float DrawLegend(float x, float y, float w, string title, double[] tiers, bool invert = false)
         {
             string[] labels = new string[tiers.Length + 1];
             for (int i = 0; i < labels.Length; i++) labels[i] = LegendLabel(tiers, i);
+            return DrawLegendCore(x, y, w, title, labels, invert);
+        }
+
+        /// <summary>增速图例：档位以 % 显示（通用的 LegendNum 会把 −100 印成「-100.00」，不能用）。</summary>
+        private float DrawLegendGrowth(float x, float y, float w, string title)
+        {
+            double[] tiers = GetGrowthDisplayTiers();
+            string[] labels = new string[tiers.Length + 1];
+            for (int i = 0; i < labels.Length; i++)
+            {
+                if (i == 0) labels[i] = "<" + Pct(tiers[0]);
+                else if (i >= tiers.Length) labels[i] = "≥" + Pct(tiers[tiers.Length - 1]);
+                else labels[i] = Pct(tiers[i - 1]);
+            }
             return DrawLegendCore(x, y, w, title, labels);
         }
 
-        private float DrawLegendCore(float x, float y, float w, string title, string[] labels)
+        /// <summary>
+        /// 增速分档阈值（**当前周期口径**）：基准表是**年**档位（用户 2026-09-27 指定），
+        /// 按**复利**换算到当前周期：`(1 + 年档位)^(N/52) − 1`，N = 周期周数（1/4/13/52/260）。
+        /// 5 年 = 年档位的 **5 次方**、周 = 52 次方根 —— 这正是"年增速连乘 N 年"的定义。
+        /// 于是档位的含义很直观：5 年视图里 +10.41% = 「连续 5 年每年 +2%」，年视图 ±2% 就是「没动」。
+        ///
+        /// ⚠️ 三个别踩的：① 不能线性缩放（周/月差别不大，5 年差一倍多）；
+        ///    ② 别照搬「增量」图例的 ×PeriodWeeks（5 年负档位会到 −2600%，而增速下限只有 −100%）；
+        ///    ③ `Math.Pow` 在 r&gt;0 时单调，所以换算后仍**严格升序** —— 档位查表（`v &lt; tiers[i]`）靠这个。
+        /// </summary>
+        private static double[] GetGrowthDisplayTiers()
+        {
+            DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+            int period = (hub != null && hub.Settings != null) ? hub.Settings.DisplayPeriod : 0;
+            int n = ModSettings.PeriodWeeks(period);
+            if (n == 52) return GROWTH_TIERS;   // 年视图就是原表
+            double exp = n / 52.0;
+            double[] t = new double[GROWTH_TIERS.Length];
+            for (int i = 0; i < t.Length; i++)
+            {
+                double r = 1.0 + GROWTH_TIERS[i] / 100.0;   // 年档位 → 年倍率
+                t[i] = r > 0.0 ? (System.Math.Pow(r, exp) - 1.0) * 100.0 : -100.0;
+            }
+            return t;
+        }
+
+        /// <summary>档位/数值标签：带符号的百分数，**两位小数**（+2.00% / −130.00%；×13 这类缩放会出现 .5，故留两位）。</summary>
+        private static string Pct(double v)
+        {
+            return (v > 0 ? "+" : "") + v.ToString("0.00") + "%";
+        }
+
+        private float DrawLegendCore(float x, float y, float w, string title, string[] labels, bool invert = false)
         {
             GUI.Label(new Rect(x, y, w, HEADER_H), title, _hdr);
             y += HEADER_H;
@@ -2681,7 +3718,9 @@ namespace DistrictFinanceManager
                 float yy = y + row * (sh + th);
 
                 Color old = GUI.color;
-                GUI.color = TIER_COLORS[i];
+                // invert = 值越小越「好」的指标（目前只有平均通勤距离）：色阶反过来，短距离取紫端、长距离取红端。
+                // ⚠️ 必须和 XxxColor() 里的取色方向一致，否则图例与列表颜色对不上（用户 2026-09-27 要求：通勤越近越好）。
+                GUI.color = invert ? TIER_COLORS[TIER_COLORS.Length - 1 - i] : TIER_COLORS[i];
                 GUI.DrawTexture(new Rect(xx, yy, sw - 2f, sh), Texture2D.whiteTexture);
                 GUI.color = old;
 

@@ -19,8 +19,30 @@ namespace DistrictFinanceManager
         // ---- 统计模式：拆成「货币 × 周期」两个独立的轴（2026-09-25）----
         // 旧字段 DisplayMode(0周/1年/2人民币年/3美元年) 已废弃，读档时自动迁移（见 ParseLine）。
         public int DisplayCurrency = 0; // 0=原版 kr  1=人民币 ¥  2=美元 $
-        public int DisplayPeriod = 0;   // 0=周 1=月(4周) 2=季(13周) 3=年(52周) 4=5年(260周)
-        public bool IncludeDirect = false; // 排名是否包含直辖区划（默认关闭）
+        public int DisplayPeriod = 0;   // 0=周 1=月(4周) 2=季(13周) 3=年(52周) 4=5年(260周) 5=10年(520周)
+        public bool IncludeDirect;
+        /// <summary>
+        /// RealTime「公园维护：开始 / 结束时间」的**原值备份**（用户 2026-09-27）。
+        /// 「公园和广场全天开放」勾选时把它改成 start == end（RealTime 自己判为全天）；
+        /// 取消勾选时用这两个值还回去。-1 = 还没记录过（那就不猜，提示去 RealTime 选项里改）。
+        /// </summary>
+        /// <summary>
+        /// 「公园和广场全天开放」是否已勾选（用户 2026-09-27：「记得保存设置，默认不勾选」）。
+        /// 存进本模组设置：勾过的档读档后会自动再应用一次（幂等），没勾过的**绝不碰** RealTime 的配置。
+        /// </summary>
+        public bool ParkAlwaysOpen = false;
+        public int ParkMaintBackupStart = -1;
+        public int ParkMaintBackupEnd = -1;
+        /// <summary>
+        /// 「自定义政府投资额」是否**跟随 RealTime 日历**（用户 2026-09-28：「设置里加入自定义投资额是否跟随
+        /// realtime 日历，勾选后把自定义投资额记入步长改为按 realtime 日历的周」）。
+        ///
+        /// false（默认）= 分期按**原版帧周**记账（GameWeek.CurrentWeek，对 RealTime 免疫）；
+        /// true = 按 **RealTime 日历周**（GameWeek.CalendarWeek，玩家在游戏里看到的日期）。
+        /// 分期周号存在 .inv 里，切换刻度会**换锚**（保持每一期相对当前时刻的位置，见
+        /// Hub.ReanchorInvestments），刻度名则记在 .inv 文件头。
+        /// </summary>
+        public bool InvestFollowRealTime = false;
         public bool ShowDebug = false; // 区域信息下方显示调试文本
         public bool AutoLanguage = true; // 打开存档时按系统语言自动切面板语言（非简/繁中→英文）
         public float PanelScale = 1.2f; // 面板缩放（滚轮），保存记忆
@@ -29,11 +51,13 @@ namespace DistrictFinanceManager
 
         #region 统计模式：货币 × 周期（两个轴，唯一的换算真源）
 
-        /// <summary>最长周期（5 年）的周数。自定义投资额的分期裁剪、周库基准回退的下界都用它。</summary>
-        public const int MaxPeriodWeeks = 260;
+        /// <summary>最长周期（10 年）的周数。自定义投资额的分期裁剪下界用它。</summary>
+        public const int MaxPeriodWeeks = 520;
 
-        /// <summary>周期周数：周 / 月 / 季 / 年 / 5年 = 1 / 4 / 13 / 52 / 260。
-        /// 建筑价值增量的「基准周回退几周」也用它（用户 2026-09-25 指定）。</summary>
+        /// <summary>周期周数：周 / 月 / 季 / 年 / 5年 / 10年 = 1 / 4 / 13 / 52 / 260 / 520。
+        /// 建筑价值增量的「基准周回退几周」也用它（用户 2026-09-25 指定）。
+        /// 10 年（520 周）是用户 2026-09-28 要求加的；周库（.series）能存多少就有多少，
+        /// 历史不足一个周期时按既有约定回退到最早的**有效**周（不报错、不显示假增速）。</summary>
         public static int PeriodWeeks(int period)
         {
             switch (period)
@@ -42,6 +66,7 @@ namespace DistrictFinanceManager
                 case 2: return 13;   // 季
                 case 3: return 52;   // 年
                 case 4: return 260;  // 5 年
+                case 5: return 520;  // 10 年
                 default: return 1;   // 周
             }
         }
@@ -93,12 +118,13 @@ namespace DistrictFinanceManager
                 case 2: return Loc.T("季", "qtr");
                 case 3: return Loc.T("年", "yr");
                 case 4: return Loc.T("5年", "5yr");
+                case 5: return Loc.T("10年", "10yr");
                 default: return Loc.T("周", "wk");
             }
         }
 
         /// <summary>是否非周周期（图例里决定写「/周」还是「/年」之类）。</summary>
-        public static bool IsMultiWeek(int period) { return period >= 1 && period <= 4; }
+        public static bool IsMultiWeek(int period) { return period >= 1 && period <= 5; }
 
         #endregion
 
@@ -160,6 +186,10 @@ namespace DistrictFinanceManager
                             }
                             break;
                         case "IncludeDirect": s.IncludeDirect = ParseBool(v, false); break;
+                        case "ParkAlwaysOpen": s.ParkAlwaysOpen = ParseBool(v, false); break;
+                        case "ParkMaintBackupStart": s.ParkMaintBackupStart = ParseInt(v, -1); break;
+                        case "ParkMaintBackupEnd": s.ParkMaintBackupEnd = ParseInt(v, -1); break;
+                        case "InvestFollowRealTime": s.InvestFollowRealTime = ParseBool(v, false); break;
                         case "ShowDebug": s.ShowDebug = ParseBool(v, false); break;
                         case "AutoLanguage": s.AutoLanguage = ParseBool(v, true); break;
                         case "PanelScale": s.PanelScale = ParseFloat(v, 1.2f); break;
@@ -192,6 +222,10 @@ namespace DistrictFinanceManager
                     w.WriteLine("DisplayCurrency=" + DisplayCurrency);
                     w.WriteLine("DisplayPeriod=" + DisplayPeriod);
                     w.WriteLine("IncludeDirect=" + IncludeDirect);
+                    w.WriteLine("ParkAlwaysOpen=" + ParkAlwaysOpen);
+                    w.WriteLine("ParkMaintBackupStart=" + ParkMaintBackupStart);
+                    w.WriteLine("ParkMaintBackupEnd=" + ParkMaintBackupEnd);
+                    w.WriteLine("InvestFollowRealTime=" + InvestFollowRealTime);
                     w.WriteLine("ShowDebug=" + ShowDebug);
                     w.WriteLine("AutoLanguage=" + AutoLanguage);
                     w.WriteLine("PanelScale=" + PanelScale.ToString(System.Globalization.CultureInfo.InvariantCulture));

@@ -84,6 +84,31 @@ namespace DistrictFinanceManager
 
             helper.AddSpace(4);
 
+            // 「自定义政府投资额」的记账周刻度（用户 2026-09-28）：勾选后按 RealTime 日历周分期。
+            // 勾选状态立即写设置；已有分期由面板那条路径换锚 —— 这里也顺手换一次（选项界面也能改）
+            helper.AddCheckbox(
+                "自定义投资额跟随 RealTime 日历 / Custom investment follows the RealTime calendar",
+                _settings.InvestFollowRealTime,
+                value =>
+                {
+                    _settings.InvestFollowRealTime = value;
+                    _settings.Save();
+                    DistrictFinanceHub hub = DistrictFinanceHub.Instance;
+                    if (hub != null)
+                    {
+                        // ⚠️ **必须先让 Hub 重新读一遍设置**（2026-09-29 核查文档 1.1，真 bug）：
+                        //    选项界面这份 `_settings` 与 `hub.Settings` 是**两个对象**，而
+                        //    `ReanchorInvestments` 的 `InvestWeek.ScaleName` 读的是 **hub.Settings** ——
+                        //    不刷新的话那一刻它还是旧值 → `target == _investScale` → 提前 return，
+                        //    换锚被**静默跳过**；接着新录入的分期按新刻度、`.inv` 文件头却还是旧刻度，
+                        //    一档混两把尺 → 下次读档按错误 delta 整体平移（RealTime 档能差几百周，账被挪出窗口）。
+                        hub.RefreshSettings();
+                        hub.ReanchorInvestments("选项界面");
+                    }
+                });
+
+            helper.AddSpace(4);
+
             helper.AddSpace(16);
 
             // 统计模式：拆成「货币 × 周期」两个独立的轴（面板右上角也有对应的两个循环按键）
@@ -95,7 +120,7 @@ namespace DistrictFinanceManager
 
             helper.AddSpace(6);
 
-            string[] perOptions = { "Week / 周", "Month / 月", "Quarter / 季", "Year / 年", "5 Years / 5年" };
+            string[] perOptions = { "Week / 周", "Month / 月", "Quarter / 季", "Year / 年", "5 Years / 5年", "10 Years / 10年" };
             UIDropDown perDrop = helper.AddDropdown("Period / 周期",
                 perOptions, _settings.DisplayPeriod,
                 value => { _settings.DisplayPeriod = value; _settings.Save(); }) as UIDropDown;
