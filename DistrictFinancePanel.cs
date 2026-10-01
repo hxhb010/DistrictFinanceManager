@@ -284,7 +284,7 @@ namespace DistrictFinanceManager
         /// 用途（2026-09-27 血的教训）：改了 DLL 但玩家没重启游戏时，面板/日志看起来"功能没生效"，
         /// 有了这一行就能一眼确认"游戏里跑的到底是哪一版"，不用再靠日志反推。
         /// </summary>
-        private const string BUILD_TAG = "2026-10-01 18:20 路径距离=路网最短路演算";
+        private const string BUILD_TAG = "2026-10-01 19:10 路径演算加更新按钮";
 
         private const float SET_W = 640f;   // 2026-09-27 用户要求：设置面板调宽、调高、字加大
         private const float SET_H = 700f;   // 用户 2026-09-28：+「跟随 RealTime 日历」+「只统计白天数据」说明 + 缓存/状态行
@@ -686,7 +686,7 @@ namespace DistrictFinanceManager
                     "Growth = (current value - value N weeks ago) / value N weeks ago x 100%, N being the current period in weeks; 0 when there is less than one period of history. The legend tiers are annual and rescaled to the current period by compounding. Building value delta and Custom gov. investment are increments themselves and have no growth. The switch is not saved.",
                     "Note: in a small district (few residents or samples) growth can swing wildly from a single data point - treat it as indicative only.",
                     "[More] The dropdown extends to the bottom of the panel - scroll with the wheel or the slider on the right. Clicking an item only changes the sort key and keeps the list open.",
-                    "[Commute] All three are counted by residence: avg commute = average straight-line home-to-work distance; local employment = share whose workplace is in the same district; avg commute time = door-to-door duration (waiting and transfers included). For an aggregate or a group, working in ANY member district counts as local. Distance and time are shorter-is-better (reversed colours, ascending order; 0 = no data, shown in white at the bottom). Avg commute time only counts after you press Start under that sort key (only trips heading to a workplace are counted); a district shows once it has enough samples (about a quarter of its employed residents), otherwise a white 0. Stop discards not-yet-finished trips but keeps the samples collected; pressing Start again just continues. It follows travelling citizens frame by frame and costs noticeable CPU, so press Stop when you do not need it. The Avg commute key has two readings, switched by two buttons under it: Straight-line distance (between the home and work building centres) and Route distance - the shortest route computed on the road and pedestrian network (both ends snapped to the nearest junction; rail, ship and air lanes are excluded), cached per home/work building pair and calculated in background slices, so no manual switch is needed. A district shows a white 0 until its pairs are done, with the share calculated so far shown after it; the status text next to the buttons shows the city-wide progress and how many pairs are still queued.",
+                    "[Commute] All three are counted by residence: avg commute = average straight-line home-to-work distance; local employment = share whose workplace is in the same district; avg commute time = door-to-door duration (waiting and transfers included). For an aggregate or a group, working in ANY member district counts as local. Distance and time are shorter-is-better (reversed colours, ascending order; 0 = no data, shown in white at the bottom). Avg commute time only counts after you press Start under that sort key (only trips heading to a workplace are counted); a district shows once it has enough samples (about a quarter of its employed residents), otherwise a white 0. Stop discards not-yet-finished trips but keeps the samples collected; pressing Start again just continues. It follows travelling citizens frame by frame and costs noticeable CPU, so press Stop when you do not need it. The Avg commute key has two readings, switched by two buttons under it: Straight-line distance (between the home and work building centres) and Route distance - the shortest route computed on the road and pedestrian network (both ends snapped to the nearest junction; rail, ship and air lanes are excluded), cached per home/work building pair and calculated in background slices. Nothing is calculated by default: press Update to start (it stops by itself when finished, and you press Update again to recompute after changing the road network or growing the city). The text next to the button shows the progress and how many pairs are still queued. A district shows a white 0 until its pairs are done, with the share calculated so far shown after it; the status text next to the buttons shows the city-wide progress and how many pairs are still queued.",
                     "[Employment] This key has two readings, and two buttons appear under it when it is the active sort key. Local employment = share of the district's employed residents whose workplace is also in that district (%). District workers = the worker count shown on the vanilla district panel (the sum of the alive counts of the commercial / industrial / office / player-industry areas; public-service employees are not included), read straight from the game data with no scanning. The worker count is a sum, so the list, the groups and the filtered view also show a share; and only the worker count supports Growth (local employment is a ratio, so it has none). The sub-mode always starts on Local employment after loading a save and is not written to the settings.",
                     "[Share] Sum-type metrics (GDP / Pop / Area / Building value delta / Built-up area / Custom investment / District workers) show a share; without a filter the denominator is the whole city, with a filter it becomes the aggregate of the filtered district (its own value plus everything under it).",
                     "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data; avg commute time needs Start to be pressed and enough samples for the district before it shows (it costs noticeable CPU - press Stop when unused). Showing 0 right after loading a save or enabling the mod is normal.",
@@ -720,7 +720,7 @@ namespace DistrictFinanceManager
                     "增速 =（当前值 − N 周前的值）÷ N 周前的值 × 100%，N = 当前周期周数；历史不足一个周期时记 0。图例档位是年档位，按复利换算到当前周期。「建筑价值增量」「自定义政府投资额」本身是增量，没有增速。开关不保存，读档后回到关闭。",
                     "注意：区划较小时（人口、样本少）增速容易被个别数据带得大幅波动，仅供参考。",
                     "【更多 ▾】下拉展开到面板底部，条目超出可视范围时用右侧滑块或滚轮滚动；点条目只换排序键，不收起下拉。",
-                    "【通勤】三项都按居住地统计：平均通勤距离＝住址到工作地的平均直线距离；本地就业率＝工作地也在本区划的比例；平均通勤时间＝门到门的时长（含候车与换乘）。聚合与组合里，工作地在范围内任一个成员内即算本地就业。距离与时间越短越好（反向配色、由小到大排；0＝无数据，白色排在最后）。平均通勤时间要在该排序下点「开始」才统计（只统计终点是工作地的那一趟）；本区划攒够样本（约就业居民数的八分之一）才显示，不足时显示白色 0，并在后面注明已统计的百分比（样本数占门槛的比例，攒到 100% 就会出数值）。「停止」会丢弃还没跟踪完的行程，已攒的样本保留；再点「开始」接着攒。这一项逐帧跟踪在途市民，性能消耗较大，不用时请点「停止」。最右边那个「最长10%」是显示口径开关：开启后改用各区划样本里最大的百分之十的平均值来显示与排名（聚合、组合也按样本数加权跟着切），用来看「最堵的那批通勤」；它只改显示，不影响周库与已攒样本，关掉就回到平均值。「平均通勤距离」这个键有两套口径，点它下面会出现两个按钮：「直线距离」＝居住建筑中心点到工作建筑中心点的几何直线；「路径距离」＝按路网演算出来的两点间最短路：把两点吸附到最近路口、沿道路与人行道网络跑最短路（火车/船/飞机不算），按「居住楼 + 工作楼」逐对缓存、后台分批演算（不需要手动开关）。某区划还没算完时显示白色 0，并在后面注明「已计算 x%」＝已算出的工作人数占本区划就业居民数的比例；按钮右边的状态词显示全城进度与待算对数。",
+                    "【通勤】三项都按居住地统计：平均通勤距离＝住址到工作地的平均直线距离；本地就业率＝工作地也在本区划的比例；平均通勤时间＝门到门的时长（含候车与换乘）。聚合与组合里，工作地在范围内任一个成员内即算本地就业。距离与时间越短越好（反向配色、由小到大排；0＝无数据，白色排在最后）。平均通勤时间要在该排序下点「开始」才统计（只统计终点是工作地的那一趟）；本区划攒够样本（约就业居民数的八分之一）才显示，不足时显示白色 0，并在后面注明已统计的百分比（样本数占门槛的比例，攒到 100% 就会出数值）。「停止」会丢弃还没跟踪完的行程，已攒的样本保留；再点「开始」接着攒。这一项逐帧跟踪在途市民，性能消耗较大，不用时请点「停止」。最右边那个「最长10%」是显示口径开关：开启后改用各区划样本里最大的百分之十的平均值来显示与排名（聚合、组合也按样本数加权跟着切），用来看「最堵的那批通勤」；它只改显示，不影响周库与已攒样本，关掉就回到平均值。「平均通勤距离」这个键有两套口径，点它下面会出现两个按钮：「直线距离」＝居住建筑中心点到工作建筑中心点的几何直线；「路径距离」＝按路网演算出来的两点间最短路：把两点吸附到最近路口、沿道路与人行道网络跑最短路（火车/船/飞机不算），按「居住楼 + 工作楼」逐对缓存、后台分批演算 —— 默认不算，要点「更新」才开始（算完自动停；之后改了路网或又长出新楼，同样要再点一次「更新」重算），按钮右边那行字写着当前进度与待算对数。某区划还没算完时显示白色 0，并在后面注明「已计算 x%」＝已算出的工作人数占本区划就业居民数的比例；按钮右边的状态词显示全城进度与待算对数。",
                     "【就业相关】这个键有两套口径：成为当前排序键时它下面会出现两个按钮。「本地就业率」＝本区划就业居民里、工作地也在本区划的比例（%）；「区域工人数」＝原版区划面板里那一格的工人数（商业 / 工业 / 办公 / 玩家产业四处「在岗人数」之和，不含公共服务职工），纯读原版数据、不做任何遍历。工人数是求和型，所以列表 / 组合 / 筛选后面都会写「占比」；也只有工人数能开「增速」（本地就业率是比值，没有增速）。子口径读档后一律回到「本地就业率」，不写进设置。",
                     "【占比】求和型指标（GDP / 人口 / 面积 / 建筑价值增量 / 建成区面积 / 自定义投资额 / 区域工人数）在列表里显示「占比」；没筛选时分母是全图合计，开启筛选后换成筛选区划的聚合值（自身 + 全部下辖）。",
                     "【统计耗时】建成区面积、建筑价值增量、人均可支配等需要遍历全城建筑的统计项，约 30 秒后才有数据；平均通勤时间需先点「开始」，并等本区划攒够样本后才显示（性能消耗较大，不用时点「停止」）。刚读取存档或刚启用模组时显示为 0 属正常。",
@@ -1266,11 +1266,23 @@ namespace DistrictFinanceManager
                     long[] re = c11.GetCommuteCount();
                     long have = 0, all = 0;
                     for (int i = 1; i < 256; i++) { have += rc[i]; all += re[i]; }
+                    int left = c11.RouteQueueLength;
                     double pct = all > 0 ? (double)have * 100.0 / all : 100.0;
-                    GUI.Label(new Rect(PAD + 190, y, PW - PAD - 190, BTN_H),
-                        Loc.T("路网演算 ", "Route calc ") + pct.ToString("0.0") + "%"
-                            + Loc.T("（待算 " + c11.RouteQueueLength + " 对）", " (" + c11.RouteQueueLength + " pairs left)"),
-                        _fl);
+                    bool running = c11.RouteCalcRunning;
+                    // 「更新」= 开始/重新开始演算（用户 2026-10-01：「加一个更新按钮，注明点击更新后开始计算」；
+                    //  「开始重算也需要更新」→ 算完自动停，新出现的建筑对也要再点一次）
+                    if (GUI.Button(new Rect(PAD + 190, y, 66, BTN_H), Loc.T("更新", "Update"),
+                            (running || left > 0) ? _bn2 : _btn))
+                        c11.StartRouteCalc();
+                    string st;
+                    if (running) st = Loc.T("已算 ", "Done ") + pct.ToString("0.0") + "%"
+                        + Loc.T(" · 待算 " + left + " 对", " · " + left + " pairs left");
+                    else if (left > 0) st = Loc.T("已算 ", "Done ") + pct.ToString("0.0") + "%"
+                        + Loc.T(" · 点「更新」继续", " · click Update to continue");
+                    else if (all > 0 && have >= all) st = Loc.T("演算完成（可点「更新」重算）",
+                        "Done (click Update to redo)");
+                    else st = Loc.T("点击「更新」后开始计算", "Click Update to start");
+                    GUI.Label(new Rect(PAD + 262, y, PW - PAD - 262, BTN_H), st, _fl);
                 }
                 y += BTN_H + 2f;
             }

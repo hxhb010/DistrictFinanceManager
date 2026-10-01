@@ -2743,6 +2743,14 @@ namespace DistrictFinanceManager
         private const int ROUTE_PAIRS_PER_TICK = 2;
         /// <summary>诊断：已算出的建筑对数（日志用）。</summary>
         private int _routeComputed;
+        /// <summary>
+        /// 路径演算的**总开关**（用户 2026-10-01：「还是加一个更新按钮吧，注明点击更新后开始计算」）：
+        /// **默认关闭** —— 建筑遍历照旧把「居住楼 ↔ 工作楼」这对发现出来并排队（几乎零成本），
+        /// 但**不跑 Dijkstra**；面板上点「更新」才置位并开始算（见 StartRouteCalc）。
+        /// **算完自动关**（用户 2026-10-01：「开始重算也需要更新」）—— 队列一空就复位，
+        /// 之后再出现的新建筑对**不会**自动补算，要再点一次「更新」。
+        /// </summary>
+        private bool _routeRun;
 
         // ---- 路网图（链表邻接；重建条件见 EnsureRoadGraph）----
         private int[] _gHead;          // 节点 → 第一条边（-1 = 无边）
@@ -2891,9 +2899,32 @@ namespace DistrictFinanceManager
             if (_routeQueued.Add(key)) _routeQueue.Add(key);
         }
 
+        /// <summary>是否已经开始演算（面板按钮高亮/状态词用）。</summary>
+        public bool RouteCalcRunning { get { return _routeRun; } }
+
+        /// <summary>
+        /// 点「更新」= **重新演算一遍**：清掉已算的距离缓存、强制重建路网图（路网可能改过）、
+        /// 把**发现过的建筑对**全部重新排队，然后开始算。面板上那行字写明「点击更新后开始计算」。
+        /// </summary>
+        public void StartRouteCalc()
+        {
+            _routeRun = true;
+            _routeCache.Clear();
+            _bldNode = null;              // 吸附结果随新图重算
+            _gBuiltTime = -999f;          // 强制重建（路网可能改了）
+            _routeQueue.Clear();
+            int n = 0;
+            foreach (long key in _routeQueued) { _routeQueue.Add(key); n++; }
+            // 派生缓存一并作废（否则面板会继续显示上一轮的数组，最多 CacheLife）
+            _routeDist = null; _routeProg = null; _aggRouteDist = null; _aggRouteProg = null;
+            Debug.Log("[DFM] 路径演算：开始（已排队 " + n + " 对建筑；每帧最多 " + ROUTE_PAIRS_PER_TICK
+                      + " 对 / ~3 ms）");
+        }
+
         /// <summary>逐帧切片：每帧最多 `ROUTE_PAIRS_PER_TICK` 对、或 ~3 ms（先到先停）。由 Hub.Update 每帧调用。</summary>
         public void TickRoutePaths()
         {
+            if (!_routeRun) return;              // 没点「更新」→ 一个字都不算（用户 2026-10-01）
             if (_routeQueue.Count == 0) return;
             EnsureRoadGraph();
             if (_gHead == null || _gNodes <= 1) return;
@@ -2910,6 +2941,12 @@ namespace DistrictFinanceManager
                 if (done >= 1 && (System.DateTime.Now.Ticks - t0) / 10000.0 > 3.0) break;   // ≈3 ms
             }
             _routeComputed += done;
+            if (_routeQueue.Count == 0)
+            {
+                // 算完就关（用户 2026-10-01）：之后新出现的建筑对要再点一次「更新」才会算
+                _routeRun = false;
+                Debug.Log("[DFM] 路径演算：完成（累计 " + _routeComputed + " 对建筑；再点「更新」可重算）");
+            }
         }
 
         /// <summary>一对建筑之间的**路网最短路**（米）；不连通返回 -1。结果不会小于两点直线距离。</summary>
