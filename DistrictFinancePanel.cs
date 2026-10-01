@@ -275,7 +275,7 @@ namespace DistrictFinanceManager
         /// 用途（2026-09-27 血的教训）：改了 DLL 但玩家没重启游戏时，面板/日志看起来"功能没生效"，
         /// 有了这一行就能一眼确认"游戏里跑的到底是哪一版"，不用再靠日志反推。
         /// </summary>
-        private const string BUILD_TAG = "2026-09-29 23:50 修换锚+去重写";
+        private const string BUILD_TAG = "2026-10-01 11:20 v3.1 发布版";
 
         private const float SET_W = 640f;   // 2026-09-27 用户要求：设置面板调宽、调高、字加大
         private const float SET_H = 700f;   // 用户 2026-09-28：+「跟随 RealTime 日历」+「只统计白天数据」说明 + 缓存/状态行
