@@ -497,6 +497,10 @@ namespace DistrictFinanceManager
             // 开销自己会打日志（ShowDebug 时每 5 秒一行，含「轮询耗时/次」）。
             if (Calculator != null) Calculator.TickCommuteTrack();
 
+            // 路网最短路演算（键 11「路径距离」）：每帧算几对（内部有 4 对 / ~3 ms 上限），
+            // 算完的对进缓存，下一轮建筑遍历把它们累进各区划（进度 = 已算人数 ÷ 就业居民数）。
+            if (Calculator != null) Calculator.TickRoutePaths();
+
             // 区划定期维护：清理已删区划的幽灵条目 + 识别 ID 复用（延迟 + 二次确认，见方法注释）
             TickDistrictMaintenance();
 

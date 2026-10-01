@@ -252,10 +252,10 @@ namespace DistrictFinanceManager
         private bool _commuteTopMode;
         /// <summary>
         /// 键 11「通勤距离」的子口径（用户 2026-10-01：「做一个路径距离和直线距离的切换，路径距离采用
-        /// 实际走的，并加入开始停止」）：
-        ///   · false（默认）= **直线距离**：居住建筑中心点 ↔ 工作建筑中心点，自动算，不用跟踪；
-        ///   · true = **路径距离**：市民**实际走的那条路**（走路/自驾/公交地铁全口径），只能靠「开始」
-        ///     后的轮询逐趟量（计算器的 `_tripDist` 累加），所以要配合开始/停止。
+        /// 实际走的」→ 当天又改成「直接按照两个地点演算最短值」）：
+        ///   · false（默认）= **直线距离**：居住建筑中心点 ↔ 工作建筑中心点，几何直线；
+        ///   · true = **路径距离**：沿**路网演算出来的最短路**（计算器把两点吸附到最近路口跑 Dijkstra，
+        ///     按建筑对缓存、逐帧切片算，进度见面板的「已计算 x%」）。
         /// **显示口径开关**，与「最长10%」一样不落盘，读档由 Awake 复位成 false。
         /// </summary>
         private bool _commutePathMode;
@@ -284,7 +284,7 @@ namespace DistrictFinanceManager
         /// 用途（2026-09-27 血的教训）：改了 DLL 但玩家没重启游戏时，面板/日志看起来"功能没生效"，
         /// 有了这一行就能一眼确认"游戏里跑的到底是哪一版"，不用再靠日志反推。
         /// </summary>
-        private const string BUILD_TAG = "2026-10-01 16:40 通勤路径距离+开始停止";
+        private const string BUILD_TAG = "2026-10-01 18:20 路径距离=路网最短路演算";
 
         private const float SET_W = 640f;   // 2026-09-27 用户要求：设置面板调宽、调高、字加大
         private const float SET_H = 700f;   // 用户 2026-09-28：+「跟随 RealTime 日历」+「只统计白天数据」说明 + 缓存/状态行
@@ -322,8 +322,8 @@ namespace DistrictFinanceManager
             _commuteTopMode = false;
             _growthMode = false;
             _commuteBtn = -1;
+            _commutePathMode = false; // 通勤距离默认回到「直线距离」（用户 2026-10-01）
             _employWorkers = false;   // 「就业相关」默认回到「本地就业率」（用户 2026-09-28 定）
-            _commutePathMode = false; // 通勤距离默认回到「直线距离」（用户 2026-10-01 定：路径要手动开跟踪）
             // 打开存档后是否自动显示面板（居中，见 OnGUI 里的位置初始化）。
             // 由选项「打开存档时自动显示面板」控制，默认开。快捷键（默认 F9）始终是开关。
             _vis = ModSettings.Load().ShowOnLoad;
@@ -686,7 +686,7 @@ namespace DistrictFinanceManager
                     "Growth = (current value - value N weeks ago) / value N weeks ago x 100%, N being the current period in weeks; 0 when there is less than one period of history. The legend tiers are annual and rescaled to the current period by compounding. Building value delta and Custom gov. investment are increments themselves and have no growth. The switch is not saved.",
                     "Note: in a small district (few residents or samples) growth can swing wildly from a single data point - treat it as indicative only.",
                     "[More] The dropdown extends to the bottom of the panel - scroll with the wheel or the slider on the right. Clicking an item only changes the sort key and keeps the list open.",
-                    "[Commute] All three are counted by residence: avg commute = average straight-line home-to-work distance; local employment = share whose workplace is in the same district; avg commute time = door-to-door duration (waiting and transfers included). For an aggregate or a group, working in ANY member district counts as local. Distance and time are shorter-is-better (reversed colours, ascending order; 0 = no data, shown in white at the bottom). Avg commute time only counts after you press Start under that sort key (only trips heading to a workplace are counted); a district shows once it has enough samples (about a quarter of its employed residents), otherwise a white 0. Stop discards not-yet-finished trips but keeps the samples collected; pressing Start again just continues. It follows travelling citizens frame by frame and costs noticeable CPU, so press Stop when you do not need it. The Avg commute key has two readings, switched by two buttons under it: Straight-line distance (between the home and work building centres, computed automatically) and Route distance (the path citizens actually travel, collected after pressing Start under that key - the same tracker also collects commute time, and walking, driving, bus, metro and train are all measured the same way; routes typically run 1.2-2x longer than straight lines). Route samples share exactly the same threshold and retention cap as commute time, and a white 0 means not enough samples yet (the share collected so far is shown after it).",
+                    "[Commute] All three are counted by residence: avg commute = average straight-line home-to-work distance; local employment = share whose workplace is in the same district; avg commute time = door-to-door duration (waiting and transfers included). For an aggregate or a group, working in ANY member district counts as local. Distance and time are shorter-is-better (reversed colours, ascending order; 0 = no data, shown in white at the bottom). Avg commute time only counts after you press Start under that sort key (only trips heading to a workplace are counted); a district shows once it has enough samples (about a quarter of its employed residents), otherwise a white 0. Stop discards not-yet-finished trips but keeps the samples collected; pressing Start again just continues. It follows travelling citizens frame by frame and costs noticeable CPU, so press Stop when you do not need it. The Avg commute key has two readings, switched by two buttons under it: Straight-line distance (between the home and work building centres) and Route distance - the shortest route computed on the road and pedestrian network (both ends snapped to the nearest junction; rail, ship and air lanes are excluded), cached per home/work building pair and calculated in background slices, so no manual switch is needed. A district shows a white 0 until its pairs are done, with the share calculated so far shown after it; the status text next to the buttons shows the city-wide progress and how many pairs are still queued.",
                     "[Employment] This key has two readings, and two buttons appear under it when it is the active sort key. Local employment = share of the district's employed residents whose workplace is also in that district (%). District workers = the worker count shown on the vanilla district panel (the sum of the alive counts of the commercial / industrial / office / player-industry areas; public-service employees are not included), read straight from the game data with no scanning. The worker count is a sum, so the list, the groups and the filtered view also show a share; and only the worker count supports Growth (local employment is a ratio, so it has none). The sub-mode always starts on Local employment after loading a save and is not written to the settings.",
                     "[Share] Sum-type metrics (GDP / Pop / Area / Building value delta / Built-up area / Custom investment / District workers) show a share; without a filter the denominator is the whole city, with a filter it becomes the aggregate of the filtered district (its own value plus everything under it).",
                     "[Data warm-up] Stats that scan every building (built-up area, building value delta, disposable income) need about 30 seconds before they have data; avg commute time needs Start to be pressed and enough samples for the district before it shows (it costs noticeable CPU - press Stop when unused). Showing 0 right after loading a save or enabling the mod is normal.",
@@ -720,7 +720,7 @@ namespace DistrictFinanceManager
                     "增速 =（当前值 − N 周前的值）÷ N 周前的值 × 100%，N = 当前周期周数；历史不足一个周期时记 0。图例档位是年档位，按复利换算到当前周期。「建筑价值增量」「自定义政府投资额」本身是增量，没有增速。开关不保存，读档后回到关闭。",
                     "注意：区划较小时（人口、样本少）增速容易被个别数据带得大幅波动，仅供参考。",
                     "【更多 ▾】下拉展开到面板底部，条目超出可视范围时用右侧滑块或滚轮滚动；点条目只换排序键，不收起下拉。",
-                    "【通勤】三项都按居住地统计：平均通勤距离＝住址到工作地的平均直线距离；本地就业率＝工作地也在本区划的比例；平均通勤时间＝门到门的时长（含候车与换乘）。聚合与组合里，工作地在范围内任一个成员内即算本地就业。距离与时间越短越好（反向配色、由小到大排；0＝无数据，白色排在最后）。平均通勤时间要在该排序下点「开始」才统计（只统计终点是工作地的那一趟）；本区划攒够样本（约就业居民数的八分之一）才显示，不足时显示白色 0，并在后面注明已统计的百分比（样本数占门槛的比例，攒到 100% 就会出数值）。「停止」会丢弃还没跟踪完的行程，已攒的样本保留；再点「开始」接着攒。这一项逐帧跟踪在途市民，性能消耗较大，不用时请点「停止」。最右边那个「最长10%」是显示口径开关：开启后改用各区划样本里最大的百分之十的平均值来显示与排名（聚合、组合也按样本数加权跟着切），用来看「最堵的那批通勤」；它只改显示，不影响周库与已攒样本，关掉就回到平均值。「平均通勤距离」这个键有两套口径，点它下面会出现两个按钮：「直线距离」＝居住建筑中心点到工作建筑中心点的直线，自动算、不用跟踪；「路径距离」＝市民实际走的那条路线，要在该键下点「开始」才统计（与「平均通勤时间」共用同一个跟踪器：时长和路程一起采），走路、自驾、公交地铁口径一致，路径一般比直线长 1.2~2 倍；路径口径的门槛、留存上限与通勤时间完全同一套，没攒够门槛时同样显示白色 0 并注明「已统计 x%」。",
+                    "【通勤】三项都按居住地统计：平均通勤距离＝住址到工作地的平均直线距离；本地就业率＝工作地也在本区划的比例；平均通勤时间＝门到门的时长（含候车与换乘）。聚合与组合里，工作地在范围内任一个成员内即算本地就业。距离与时间越短越好（反向配色、由小到大排；0＝无数据，白色排在最后）。平均通勤时间要在该排序下点「开始」才统计（只统计终点是工作地的那一趟）；本区划攒够样本（约就业居民数的八分之一）才显示，不足时显示白色 0，并在后面注明已统计的百分比（样本数占门槛的比例，攒到 100% 就会出数值）。「停止」会丢弃还没跟踪完的行程，已攒的样本保留；再点「开始」接着攒。这一项逐帧跟踪在途市民，性能消耗较大，不用时请点「停止」。最右边那个「最长10%」是显示口径开关：开启后改用各区划样本里最大的百分之十的平均值来显示与排名（聚合、组合也按样本数加权跟着切），用来看「最堵的那批通勤」；它只改显示，不影响周库与已攒样本，关掉就回到平均值。「平均通勤距离」这个键有两套口径，点它下面会出现两个按钮：「直线距离」＝居住建筑中心点到工作建筑中心点的几何直线；「路径距离」＝按路网演算出来的两点间最短路：把两点吸附到最近路口、沿道路与人行道网络跑最短路（火车/船/飞机不算），按「居住楼 + 工作楼」逐对缓存、后台分批演算（不需要手动开关）。某区划还没算完时显示白色 0，并在后面注明「已计算 x%」＝已算出的工作人数占本区划就业居民数的比例；按钮右边的状态词显示全城进度与待算对数。",
                     "【就业相关】这个键有两套口径：成为当前排序键时它下面会出现两个按钮。「本地就业率」＝本区划就业居民里、工作地也在本区划的比例（%）；「区域工人数」＝原版区划面板里那一格的工人数（商业 / 工业 / 办公 / 玩家产业四处「在岗人数」之和，不含公共服务职工），纯读原版数据、不做任何遍历。工人数是求和型，所以列表 / 组合 / 筛选后面都会写「占比」；也只有工人数能开「增速」（本地就业率是比值，没有增速）。子口径读档后一律回到「本地就业率」，不写进设置。",
                     "【占比】求和型指标（GDP / 人口 / 面积 / 建筑价值增量 / 建成区面积 / 自定义投资额 / 区域工人数）在列表里显示「占比」；没筛选时分母是全图合计，开启筛选后换成筛选区划的聚合值（自身 + 全部下辖）。",
                     "【统计耗时】建成区面积、建筑价值增量、人均可支配等需要遍历全城建筑的统计项，约 30 秒后才有数据；平均通勤时间需先点「开始」，并等本区划攒够样本后才显示（性能消耗较大，不用时点「停止」）。刚读取存档或刚启用模组时显示为 0 属正常。",
@@ -1113,14 +1113,12 @@ namespace DistrictFinanceManager
             }
             else if (_sortKey == 11)
             {
-                // 通勤距离：km 档位，与货币/周期无关（居住地口径，见计算器 GetCommuteDistance）。
+                // 平均通勤距离：km 档位，与货币/周期无关（居住地口径，见计算器 GetCommuteDistance）。
                 // **invert：越近越好** → 色阶与图例都反过来（短 = 紫、长 = 红），与 CommuteColor 同向。
-                // 两个子口径共用这一张档位表（路径距离系统性比直线长，热力会整体偏热 —— 刻意的：
-                // 用户看的是"远近"排序，两种口径的档位含义一致）。
                 y = DrawLegend(PAD, y, PW - PAD * 2,
                     _commutePathMode
-                        ? Loc.T("颜色图例 · 路径通勤距离（km，实际走的路线，越近越好）",
-                                "Legend · Commute route distance (km, actually travelled, shorter is better)")
+                        ? Loc.T("颜色图例 · 路径通勤距离（km，按路网演算的最短路，越近越好）",
+                                "Legend · Commute route distance (km, shortest route on the road network, shorter is better)")
                         : Loc.T("颜色图例 · 平均通勤距离（km，居住地口径，越近越好）",
                                 "Legend · Avg commute (km, by residence, shorter is better)"),
                     COMMUTE_TIERS, true);
@@ -1247,12 +1245,11 @@ namespace DistrictFinanceManager
                 y += BTN_H + 2f;
             }
 
-            // ==== 「通勤距离」的直线 / 路径切换（用户 2026-10-01：「做一个路径距离和直线距离的切换，
-            //      路径距离采用实际走的，并加入开始停止」）====
-            // 直线距离 = 居住/工作建筑中心点之间的直线（自动算，不用跟踪）；
-            // 路径距离 = 市民**实际走的那条路**（走路/自驾/公交地铁全口径），只能靠跟踪逐趟量
-            //   → 所以**只在「路径距离」下**才显示开始/停止（与「平均通勤时间」共用同一个跟踪器：
-            //     开了之后时长与路程一起采，切到键 13 看到的就是同一个开关的状态）。
+            // ==== 「通勤距离」的直线 / 路径切换（用户 2026-10-01：「做一个路径距离和直线距离的切换」，
+            //      路径口径当天改为「直接按两点演算路网最短路」）====
+            // 直线距离 = 居住/工作建筑中心点的几何直线（自动算，不用任何跟踪）；
+            // 路径距离 = 计算器把这两点吸附到最近路口、跑 Dijkstra 得到的最短路（按建筑对缓存、逐帧切片），
+            //   **不需要开始/停止** —— 状态词显示全城演算进度（已算人数 ÷ 就业居民数）与待算对数。
             // 与「最长10%」同性质：**显示口径开关**，不落盘、不改周库。
             if (_sortKey == 11 && _viewMode != VIEW_INVEST)
             {
@@ -1264,22 +1261,16 @@ namespace DistrictFinanceManager
                     _commutePathMode = true;
                 if (_commutePathMode)
                 {
-                    DistrictFinanceCalculator calc11 = _hub.Calculator;
-                    bool run11 = calc11.CommuteTracking;
-                    if (GUI.Button(new Rect(PAD + 194, y, 66, BTN_H), Loc.T("开始", "Start"),
-                            _commuteBtn == 0 ? _bn2 : _btn))
-                    {
-                        calc11.StartCommuteTracking();
-                        _commuteBtn = 0;
-                    }
-                    if (GUI.Button(new Rect(PAD + 262, y, 66, BTN_H), Loc.T("停止", "Stop"),
-                            _commuteBtn == 1 ? _bn2 : _btn))
-                    {
-                        calc11.StopCommuteTracking();
-                        _commuteBtn = 1;
-                    }
-                    GUI.Label(new Rect(PAD + 336, y, PW - PAD - 336, BTN_H),
-                        run11 ? Loc.T("统计中", "Counting") : Loc.T("已停止", "Stopped"), _fl);
+                    DistrictFinanceCalculator c11 = _hub.Calculator;
+                    long[] rc = c11.GetCommuteRouteCount();
+                    long[] re = c11.GetCommuteCount();
+                    long have = 0, all = 0;
+                    for (int i = 1; i < 256; i++) { have += rc[i]; all += re[i]; }
+                    double pct = all > 0 ? (double)have * 100.0 / all : 100.0;
+                    GUI.Label(new Rect(PAD + 190, y, PW - PAD - 190, BTN_H),
+                        Loc.T("路网演算 ", "Route calc ") + pct.ToString("0.0") + "%"
+                            + Loc.T("（待算 " + c11.RouteQueueLength + " 对）", " (" + c11.RouteQueueLength + " pairs left)"),
+                        _fl);
                 }
                 y += BTN_H + 2f;
             }
@@ -1727,7 +1718,7 @@ namespace DistrictFinanceManager
             // 层级树是层级型视图 → 增速用**聚合**口径（不支持的键返回 null，SortValue 自动落回原口径）
             double[] growth = _growthMode ? GrowthForCurrentKey(true) : null;
             // 通勤距离 / 本地就业率（居住地口径）：层级树同样是**聚合**口径
-            double[] commute = AggCommuteDists();   // 键 11 子口径：直线距离 / 路径距离
+            double[] commute = AggCommuteDists();   // 键 11 子口径：直线距离 / 路径距离（路网演算）
             double[] localEmp = AggEmployValues();   // 键 12 子口径：本地就业率 / 区域工人数
             double[] commuteTime = AggCommuteTimes();
             for (int i = 1; i < 256; i++)
@@ -1889,21 +1880,21 @@ namespace DistrictFinanceManager
         }
 
         /// <summary>
-        /// 键 11「通勤距离」当前子口径下的**自身**数组（km）：直线距离（建筑中心点）或
-        /// **路径距离（市民实际走的）**。⚠️ 与「最长10%」同规矩：**取这一列的每一处都要走这两个助手**，
-        /// 别再直接调 `GetCommuteDistance()` —— 那会让有的地方显示直线、有的地方显示路径。
+        /// 键 11「通勤距离」当前子口径下的**自身**数组（km）：直线距离 或 **路网演算的最短路径距离**。
+        /// ⚠️ 与「最长10%」同规矩：**取这一列的每一处都走这两个助手**，别再直接调 `GetCommuteDistance()`
+        /// —— 那会让有的地方显示直线、有的地方显示路径。
         /// </summary>
         private double[] SelfCommuteDists()
         {
             DistrictFinanceCalculator c = _hub.Calculator;
-            return _commutePathMode ? c.GetCommutePathDistance() : c.GetCommuteDistance();
+            return _commutePathMode ? c.GetCommuteRouteDistance() : c.GetCommuteDistance();
         }
 
         /// <summary>键 11 当前子口径下的**聚合**数组（km）。</summary>
         private double[] AggCommuteDists()
         {
             DistrictFinanceCalculator c = _hub.Calculator;
-            return _commutePathMode ? c.GetAggregateCommutePathDistance() : c.GetAggregateCommuteDistance();
+            return _commutePathMode ? c.GetAggregateCommuteRouteDistance() : c.GetAggregateCommuteDistance();
         }
 
         // ================== 键 12「就业相关」的两个子口径（用户 2026-09-28）==================
@@ -2066,7 +2057,7 @@ namespace DistrictFinanceManager
         private string SortLabel(int key)
         {
             string n = SortLabelCore(key);
-            // 键 11 的子口径（直线/路径）在**实例**方法里覆盖 —— SortLabelCore 是 static，读不到 _commutePathMode
+            // 键 11 的子口径名在**实例**方法里覆盖 —— SortLabelCore 是 static，读不到 _commutePathMode
             if (key == 11 && _commutePathMode)
                 n = Loc.T("路径通勤距离", "Commute route distance");
             if (GrowthActive(key))
@@ -2088,7 +2079,7 @@ namespace DistrictFinanceManager
                 case 8: return Loc.T("建成区面积", "Built-up area");
                 case 9: return Loc.T("人均可支配", "Disposable/capita");
                 case 10: return Loc.T("自定义政府投资额", "Custom gov. investment");
-                case 11: return Loc.T("平均通勤距离", "Avg commute");   // 子口径名（直线/路径）由实例方法 SortLabel 覆盖
+                case 11: return Loc.T("平均通勤距离", "Avg commute");
                 case 12: return Loc.T("就业相关", "Employment");   // 键名统一叫「就业相关」（用户 2026-09-28）；
                                                                    // 子口径（本地就业率/区域工人数）由图例标题与两个按钮体现
                 case 13: return Loc.T("平均通勤时间", "Avg commute time");
@@ -2121,10 +2112,12 @@ namespace DistrictFinanceManager
             // 「所有区划」是平铺列表 → 增速用**自身**口径
             double[] growth = _growthMode ? GrowthForCurrentKey(false) : null;
             // 通勤距离 / 本地就业率（居住地口径）：平铺列表用**自身**值
-            double[] commuteD = SelfCommuteDists();   // 键 11 子口径：直线距离 / 路径距离
+            double[] commuteD = SelfCommuteDists();   // 键 11 子口径：直线距离 / 路径距离（路网演算）
             double[] localEmpD = SelfEmployValues();   // 键 12 子口径：本地就业率 / 区域工人数
             double[] commuteTimeD = SelfCommuteTimes();
             double[] commuteProg = _hub.Calculator.GetCommuteProgress();   // 白色 0 的行要注明「已统计 x%」
+            // 键 11「路径距离」的白 0 是**演算还没跑到** → 注的是「已计算 x%」（人数口径），与样本口径不同
+            double[] routeProg = _hub.Calculator.GetCommuteRouteProgress();
 
             var items = new List<KeyValuePair<ushort, double>>();
             foreach (ushort did in all)
@@ -2165,7 +2158,8 @@ namespace DistrictFinanceManager
                     : "";
                 string line = (selected ? "▶ " : "  ")
                     + string.Format("{0}. {1}    {2}", i + 1, name,
-                        FormatSortValue(items[i].Value, (_sortKey == 13 || (_sortKey == 11 && _commutePathMode)) ? commuteProg[did] : -1.0)) + share;
+                        FormatSortValue(items[i].Value, _sortKey == 13 ? commuteProg[did]
+                            : (_sortKey == 11 && _commutePathMode ? routeProg[did] : -1.0))) + share;
                 Color old = GUI.color;
                 GUI.color = SortColor(_sortKey, items[i].Value);
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
@@ -2219,6 +2213,8 @@ namespace DistrictFinanceManager
             double[] aggCommuteTime = AggCommuteTimes();
             double[] selfCommuteTime = SelfCommuteTimes();
             double[] aggCommuteProg = _hub.Calculator.GetAggregateCommuteProgress();
+            double[] aggRouteProg = _hub.Calculator.GetAggregateCommuteRouteProgress();
+            double[] routeProg = _hub.Calculator.GetCommuteRouteProgress();   // 直辖行用**自身**进度
             double[] selfCommuteProg = _hub.Calculator.GetCommuteProgress();
 
             var items = new List<RankEntry>();
@@ -2277,10 +2273,10 @@ namespace DistrictFinanceManager
                     : "";
                 string line = (selected ? "▶ " : "  ")
                     + string.Format("{0}. {1}    {2}", rank, label,
-                        FormatSortValue(items[i].value,
-                            (_sortKey == 13 || (_sortKey == 11 && _commutePathMode))
+                        FormatSortValue(items[i].value, _sortKey == 13
                             ? (items[i].parentLevel ? selfCommuteProg[did] : aggCommuteProg[did])
-                            : -1.0)) + share;   // 排名视图：键 11 路径子模式同样注进度（白色 0＝没到门槛）
+                            : (_sortKey == 11 && _commutePathMode
+                                ? (items[i].parentLevel ? routeProg[did] : aggRouteProg[did]) : -1.0))) + share;
                 Color old = GUI.color;
                 GUI.color = SortColor(_sortKey, items[i].value);
                 Rect btn = new Rect(0, cy + i * NODE_H, lw, NODE_H);
@@ -2373,8 +2369,8 @@ namespace DistrictFinanceManager
             double[] workSelf = _hub.Calculator.GetDistrictPanelWorkers();
             double totalWork = (_sortKey == 12 && _employWorkers) ? TotalSumD(workSelf) : 0.0;
             // 通勤距离 / 本地就业率：**每帧按成员预算一次**，排序比较器与行渲染都只读（见 GroupValue 注释）
-            double[] gCommute, gLocalEmp, gCommuteTime, gCommuteProg;
-            BuildGroupCommuteValues(out gCommute, out gLocalEmp, out gCommuteTime, out gCommuteProg);
+            double[] gCommute, gLocalEmp, gCommuteTime, gCommuteProg, gRouteProg;
+            BuildGroupCommuteValues(out gCommute, out gLocalEmp, out gCommuteTime, out gCommuteProg, out gRouteProg);
             var order = new List<int>();
             for (int i = 0; i < Groups.Count; i++) order.Add(i);
             order.Sort((a, b) => CompareRows(
@@ -2400,8 +2396,8 @@ namespace DistrictFinanceManager
                         share = Loc.T("  占比 ", "  share ") + Share(GroupSumD(gi, workSelf), totalWork);
                 }
                 string line = (active ? "▶ " : "  ") + (r + 1) + ". " + g.Name
-                    + "  " + FormatSortValue(gval, (_sortKey == 13 || (_sortKey == 11 && _commutePathMode))
-                        ? gCommuteProg[gi] : -1.0) + share
+                    + "  " + FormatSortValue(gval, _sortKey == 13 ? gCommuteProg[gi]
+                        : (_sortKey == 11 && _commutePathMode ? gRouteProg[gi] : -1.0)) + share
                     + "  " + Loc.T("成员", "mem") + g.Members.Count;
                 Rect rowRect = new Rect(x0, cy, lw - 146, NODE_H);
                 Color old = GUI.color;
@@ -3030,8 +3026,9 @@ namespace DistrictFinanceManager
         ///   · 平均通勤时间（分钟）= Σ成员(时间×趟数) ÷ Σ成员趟数（与距离同一套加权）。
         /// </summary>
         private void BuildGroupCommuteValues(out double[] commute, out double[] localEmp, out double[] commuteTime,
-            out double[] commuteProg)
+            out double[] commuteProg, out double[] routeProg)
         {
+            routeProg = new double[Groups.Count];   // 键 11「路径距离」白 0 行注的「已计算 x%」
             commute = new double[Groups.Count];
             localEmp = new double[Groups.Count];
             commuteTime = new double[Groups.Count];
@@ -3039,8 +3036,9 @@ namespace DistrictFinanceManager
             DistrictFinanceCalculator calc = _hub.Calculator;
             double[] dist = calc.GetCommuteDistance();
             long[] cnt = calc.GetCommuteCount();
-            // 「路径距离」子模式要用它（按趟数加权；非路径模式用不到，白拿一次缓存数组，代价可忽略）
-            double[] pathDist = calc.GetCommutePathDistance();
+            // 「路径距离」子模式要用（成员汇总后再相除；非路径模式用不到，白拿一次缓存数组）
+            double[] routeSum = calc.GetCommuteRouteSum();
+            long[] routeCnt = calc.GetCommuteRouteCount();
             double[] time = _commuteTopMode ? calc.GetCommuteTopTime() : calc.GetCommuteTime();
             long[] timeCnt = calc.GetCommuteTimeCount();
             // 「区域工人数」子模式要用它（成员自身值求和；非工人模式用不到，白拿一次缓存数组，代价可忽略）
@@ -3078,17 +3076,17 @@ namespace DistrictFinanceManager
                 }
                 else commuteProg[gi] = -1.0;   // 成员没有就业居民 → 这一项不适用
                 if (total <= 0) continue;
-                // 键 11 的两个子口径：
-                //   · 直线距离 → 距离×**人数** ÷ 人数（几何口径，权重是就业居民数）
-                //   · 路径距离 → Σ(成员路径均 × 该成员**趟数**) ÷ Σ趟数（样本口径，与通勤时间同一套门槛/权重）
+                // 键 11 子口径：直线 = 距离×人数 ÷ 人数；路径 = Σ成员距离合计 ÷ Σ成员已算人数（米 → km）
                 if (_commutePathMode)
                 {
-                    if (ttotal > 0 && DistrictFinanceCalculator.CommuteSamplesEnough(ttotal, total))
+                    double rsum = 0.0; long rcnt = 0;
+                    for (int m = 0; m < ms.Count; m++) { rsum += routeSum[ms[m]]; rcnt += routeCnt[ms[m]]; }
+                    if (rcnt > 0)
                     {
-                        double dsum = 0.0;
-                        for (int m = 0; m < ms.Count; m++) dsum += pathDist[ms[m]] * timeCnt[ms[m]];
-                        commute[gi] = dsum / ttotal;
+                        commute[gi] = rsum / rcnt / 1000.0;
+                        routeProg[gi] = rcnt >= total ? 100.0 : (double)rcnt * 100.0 / total;
                     }
+                    else routeProg[gi] = total > 0 ? 0.0 : -1.0;
                 }
                 else commute[gi] = wsum / total;   // 距离×人数 ÷ 人数 → km
                 // 键 12「就业相关」的第二个子口径：**区域工人数** = 成员**自身**值之和
